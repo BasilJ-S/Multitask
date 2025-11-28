@@ -1,6 +1,11 @@
+import numpy as np
 import tensorly as tl
 import torch
+from datasets import Dataset as hfDataset
 from datasets import load_dataset
+from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing.tests import test_data
+from sklearn.utils import validation
 from torch import optim
 from torch.utils.data import DataLoader
 from tqdm.auto import trange
@@ -124,6 +129,10 @@ class SharedTTLinearLayer(torch.nn.Module):
 
 
 class MultiTaskMLP_TTSoftshare(torch.nn.Module):
+    """
+    Multi-task MLP with TT-soft sharing layers.
+    """
+
     def __init__(self, input_size, hidden_size, output_sizes, tt_rank=4):
         super().__init__()
         self.input_size = input_size
@@ -177,19 +186,152 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
         return out
 
 
+class PreScaledHFDataset(torch.utils.data.Dataset):
+    """
+    Dataset wrapper for Hugging Face datasets that applies pre-scaling to features and targets.
+    """
+
+    def __init__(
+        self,
+        hf_dataset: hfDataset,
+        feature_cols: list[str],
+        target_cols: list[str],
+        scaler_X: StandardScaler | None = None,
+        scaler_y: StandardScaler | None = None,
+    ):
+        import numpy as np
+
+        self.feature_cols = feature_cols
+        self.target_cols = target_cols
+
+        # Convert to NumPy arrays
+        X = np.stack([hf_dataset[col] for col in feature_cols], axis=1)
+        y = np.stack([hf_dataset[col] for col in target_cols], axis=1)
+
+        # Apply scaling if provided
+        if scaler_X is not None:
+            X = scaler_X.transform(X)
+        if scaler_y is not None:
+            y = scaler_y.transform(y)
+
+        # Store as tensors directly
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+def run_epoch(
+    dataloader: DataLoader,
+    model: torch.nn.Module,
+    loss_fn: torch.nn.Module,
+    optimizer: torch.optim.Optimizer | None = None,
+    device=torch.device("cpu"),
+):
+    """
+    Run one epoch of training or evaluation.
+    If optimizer is provided, runs in training mode, otherwise in eval mode.
+    Returns average loss over the epoch.
+    """
+    is_training = optimizer is not None
+
+    if is_training:
+        model.train()
+    else:
+        model.eval()
+
+    total_loss = 0.0
+    total_samples = 0
+
+    for X, y in dataloader:
+        X = X.unsqueeze(1).to(device)  # (batch_size, 1, num_features)
+        y = y.to(device)
+
+        if is_training:
+            optimizer.zero_grad()
+            predictions = model(X.float())
+        else:
+            with torch.no_grad():
+                predictions = model(X.float())
+        # Combine predictions into a single tensor for easier handling
+        predictions = torch.cat(predictions, dim=1)
+
+        # compute per-task MSE (using the loss defined above) and sum them
+        l = torch.stack(
+            [
+                loss_fn(pred.squeeze(), y_i.float().to(device))
+                for pred, y_i in zip(predictions, y)
+            ]
+        ).mean()
+
+        if is_training:
+            l.backward()
+            optimizer.step()
+
+        total_loss += l.item() * y[0].size(0)
+        total_samples += y[0].size(0)
+
+    avg_loss = total_loss / total_samples
+    return avg_loss
+
+
 ds = load_dataset("gvlassis/california_housing").with_format("torch")
+
+
+hf_train: hfDataset = ds["train"]  # type: ignore
+hf_validation: hfDataset = ds["validation"]  # type: ignore
+
+
+targets = ["MedHouseVal", "AveRooms"]
+features = [col for col in hf_train.column_names if col not in targets]
+print("Features:", features, "Targets:", targets)
+
+# Fit scalers on training data
+target_scaler = StandardScaler()
+feature_scaler = StandardScaler()
+train_features = np.stack([hf_train[col] for col in features], axis=1)
+train_targets = np.stack([hf_train[col] for col in targets], axis=1)
+feature_scaler.fit(train_features)
+target_scaler.fit(train_targets)
+print(
+    "Feature means:",
+    feature_scaler.mean_,
+    "stds:",
+    feature_scaler.scale_,
+    " Target means:",
+    target_scaler.mean_,
+    "stds:",
+    target_scaler.scale_,
+)
+
+# Create pre-scaled datasets
+train_dataset = PreScaledHFDataset(
+    hf_train, features, targets, scaler_X=feature_scaler, scaler_y=target_scaler
+)
+validation_dataset = PreScaledHFDataset(
+    hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=target_scaler
+)
+validation_dataset_unscaled = PreScaledHFDataset(
+    hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=None
+)
+
 
 loss = torch.nn.MSELoss(reduction="mean")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-train_dataloader = DataLoader(ds["train"], batch_size=128, shuffle=True)
-validation_dataloader = DataLoader(ds["validation"], batch_size=128)
+train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+validation_dataloader_unscaled = DataLoader(validation_dataset_unscaled, batch_size=128)
 
 # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
 modelList = [
     MultiTaskMLP_TTSoftshare(
-        input_size=7, hidden_size=16, output_sizes=[1, 1], tt_rank=6
+        input_size=7, hidden_size=16, output_sizes=[1, 1], tt_rank=4
     ).to(device),
     MultiTaskNaiveMLP(input_size=7, hidden_size=16, output_sizes=[1, 1]).to(device),
     MultiTaskMLP(input_size=7, hidden_size=18, output_sizes=[1, 1]).to(device),
@@ -203,69 +345,15 @@ for model in modelList:
     optimizer = optim.Adam(params=model.parameters(), lr=0.001)
     prev_train_loss = float("inf")
     prev_val_loss = float("inf")
-    targets = ["MedHouseVal", "AveRooms"]
     t = trange(20, unit="epoch")
     for _epoch in t:
-        train_sum = 0.0
-        train_n = 0
-        model.train()
+        train_loss = run_epoch(
+            train_dataloader, model, loss, optimizer=optimizer, device=device
+        )
 
-        for i, batch in enumerate(train_dataloader):
-            optimizer.zero_grad()
-            y = [batch[k] for k in targets]
-
-            X = (
-                torch.stack([batch[k] for k in batch if k not in targets], dim=1)
-                .unsqueeze(1)
-                .to(device)
-            )  # (batch_size, 1, input_size)
-
-            predictions = model(X.float())
-
-            # compute per-task MSE (using the loss defined above) and sum them
-            l = torch.stack(
-                [
-                    loss(pred.squeeze(), y_i.float().to(device))
-                    for pred, y_i in zip(predictions, y)
-                ]
-            ).sum()
-
-            l.backward()
-            optimizer.step()
-            train_sum += l.item() * y[0].size(0)
-            train_n += y[0].size(0)
-        train_loss = train_sum / train_n
-
-        model.eval()
-
-        val_sum = 0.0
-        val_n = 0
-        model.eval()
-        with torch.no_grad():
-            for batch in validation_dataloader:
-                y = [batch[k] for k in targets]
-
-                X = (
-                    torch.stack([batch[k] for k in batch if k not in targets], dim=1)
-                    .unsqueeze(1)
-                    .to(device)
-                )
-
-                predictions = model(X.float())
-
-                # compute per-task MSE (using the loss defined above) and sum them
-                l = torch.stack(
-                    [
-                        loss(pred.squeeze(), y_i.float().to(device))
-                        for pred, y_i in zip(predictions, y)
-                    ]
-                )
-                l = l.sum()
-
-                val_sum += l.item() * y[0].size(0)
-                val_n += y[0].size(0)
-
-        val_loss = val_sum / val_n
+        val_loss = run_epoch(
+            validation_dataloader, model, loss, optimizer=None, device=device
+        )
 
         results[model.__class__.__name__].append(
             {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
@@ -275,6 +363,14 @@ for model in modelList:
         message = f"Model {model.__class__.__name__} | Epoch {_epoch} | Train: {train_loss:.3f} | Val: {val_loss:.3f}"
         t.set_description(message)
         t.write(message)
+
+    # Validate on unscaled data for interpretability
+    val_loss_unscaled = run_epoch(
+        validation_dataloader_unscaled, model, loss, optimizer=None, device=device
+    )
+    print(
+        f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled:.3f}"
+    )
 
 
 # Plot results
