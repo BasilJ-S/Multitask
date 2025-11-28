@@ -12,30 +12,30 @@ from tqdm.auto import trange
 
 
 class SingleTaskMLP(torch.nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_sizes, output_size):
         super().__init__()
         self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.hidden_sizes = hidden_sizes
         self.output_size = output_size
 
-        self.layer1 = torch.nn.Linear(input_size, hidden_size)
-        self.layer2 = torch.nn.Linear(hidden_size, hidden_size)
-        self.layer3 = torch.nn.Linear(hidden_size, output_size)
-        self.activation = torch.nn.ReLU()
+        layers = [torch.nn.Linear(input_size, hidden_sizes[0]), torch.nn.ReLU()]
+        for i in range(1, len(hidden_sizes)):
+            layers.append(torch.nn.Linear(hidden_sizes[i - 1], hidden_sizes[i]))
+            layers.append(torch.nn.ReLU())
+        layers.append(torch.nn.Linear(hidden_sizes[-1], output_size))
+        self.network = torch.nn.Sequential(*layers)
 
     def forward(self, x):
-        x = self.activation(self.layer1(x))
-        x = self.activation(self.layer2(x))
-        x = self.layer3(x)
+        x = self.network(x)
         return x
 
 
 class MultiTaskNaiveMLP(torch.nn.Module):
-    def __init__(self, input_size, hidden_size, output_sizes):
+    def __init__(self, input_size, hidden_sizes, output_sizes):
         super().__init__()
         self.models = torch.nn.ModuleList(
             [
-                SingleTaskMLP(input_size, hidden_size, output_size)
+                SingleTaskMLP(input_size, hidden_sizes, output_size)
                 for output_size in output_sizes
             ]
         )
@@ -46,26 +46,63 @@ class MultiTaskNaiveMLP(torch.nn.Module):
 
 
 class MultiTaskMLP(torch.nn.Module):
-    def __init__(self, input_size, hidden_size, output_sizes):
+    def __init__(
+        self,
+        input_size,
+        shared_hidden_sizes,
+        task_hidden_sizes,
+        output_sizes,
+    ):
         super().__init__()
         self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.shared_hidden_sizes = shared_hidden_sizes
+        self.task_hidden_sizes = task_hidden_sizes
         self.output_sizes = output_sizes
 
-        self.shared_layer1 = torch.nn.Linear(input_size, hidden_size)
-        self.shared_layer2 = torch.nn.Linear(hidden_size, hidden_size)
-        self.shared_layer3 = torch.nn.Linear(hidden_size, hidden_size)
-        self.activation = torch.nn.ReLU()
+        shared_layers = [
+            torch.nn.Linear(input_size, shared_hidden_sizes[0]),
+            torch.nn.ReLU(),
+        ]
+        for i in range(1, len(shared_hidden_sizes)):
+            shared_layers.append(
+                torch.nn.Linear(shared_hidden_sizes[i - 1], shared_hidden_sizes[i])
+            )
+            shared_layers.append(torch.nn.ReLU())
+        self.shared_layers = torch.nn.Sequential(*(shared_layers))
 
-        self.task_layers = torch.nn.ModuleList(
-            [torch.nn.Linear(hidden_size, output_size) for output_size in output_sizes]
-        )
+        self.task_layers = torch.nn.ModuleList()
+
+        for output_size in output_sizes:
+            task_layer_list = []
+            if len(task_hidden_sizes) == 0:
+                # No task-specific hidden layers
+                task_layer_list.append(
+                    torch.nn.Linear(shared_hidden_sizes[-1], output_size)
+                )
+            else:
+                # Task-specific hidden layers
+                task_layer_list.append(
+                    torch.nn.Linear(shared_hidden_sizes[-1], task_hidden_sizes[0])
+                )
+                task_layer_list.append(torch.nn.ReLU())
+
+                for i in range(1, len(task_hidden_sizes)):
+                    task_layer_list.append(
+                        torch.nn.Linear(task_hidden_sizes[i - 1], task_hidden_sizes[i])
+                    )
+                    task_layer_list.append(torch.nn.ReLU())
+                task_layer_list.append(
+                    torch.nn.Linear(task_hidden_sizes[-1], output_size)
+                )
+            self.task_layers.append(torch.nn.Sequential(*task_layer_list))
+        print(self.task_layers)
+        print(self.shared_layers)
 
     def forward(self, x):
-        x = self.activation(self.shared_layer1(x))
-        x = self.activation(self.shared_layer2(x))
-        x = self.activation(self.shared_layer3(x))
-        outputs = [task_layer(x) for task_layer in self.task_layers]
+        x = self.shared_layers(x)
+
+        outputs = [task_layers(x) for task_layers in self.task_layers]
+
         return outputs
 
 
@@ -131,58 +168,55 @@ class SharedTTLinearLayer(torch.nn.Module):
 class MultiTaskMLP_TTSoftshare(torch.nn.Module):
     """
     Multi-task MLP with TT-soft sharing layers.
+    Only one task specific layer to project to output size of each task.
+    All other layers are shared using TT-soft sharing.
     """
 
-    def __init__(self, input_size, hidden_size, output_sizes, tt_rank=4):
+    def __init__(
+        self,
+        input_size,
+        hidden_sizes: list[int],
+        output_sizes,
+        tt_rank=4,
+    ):
         super().__init__()
         self.input_size = input_size
-        self.hidden_size = hidden_size
+        self.hidden_size = hidden_sizes
         self.output_sizes = output_sizes
-        self.num_tasks = len(
-            output_sizes
-        )  # So this is fucked, its supposed to have have anotehr task dimension, which is why I'm getting just 2d TT cores which is BAD.
+        self.num_tasks = len(output_sizes)
 
-        self.shared_layer1 = SharedTTLinearLayer(
-            in_features=input_size,
-            out_features=hidden_size,
-            tt_rank=tt_rank,
-            num_tasks=self.num_tasks,
-        )
-        self.shared_layer2 = SharedTTLinearLayer(
-            in_features=hidden_size,
-            out_features=hidden_size,
-            tt_rank=tt_rank,
-            num_tasks=self.num_tasks,
-        )
-        self.shared_layer_3 = SharedTTLinearLayer(
-            in_features=hidden_size,
-            out_features=hidden_size,
-            tt_rank=tt_rank,
-            num_tasks=self.num_tasks,
-        )
-        self.activation = torch.nn.ReLU()
+        shared_layers = [
+            SharedTTLinearLayer(
+                in_features=input_size,
+                out_features=hidden_sizes[0],
+                tt_rank=tt_rank,
+                num_tasks=self.num_tasks,
+            ),
+            torch.nn.ReLU(),
+        ]
+
+        for layer in range(1, len(hidden_sizes)):
+            shared_layers.append(
+                SharedTTLinearLayer(
+                    in_features=hidden_sizes[layer - 1],
+                    out_features=hidden_sizes[layer],
+                    tt_rank=tt_rank,
+                    num_tasks=self.num_tasks,
+                )
+            )
+            shared_layers.append(torch.nn.ReLU())
+        self.shared_layers = torch.nn.Sequential(*(shared_layers))
 
         self.task_layers = torch.nn.ModuleList(
-            [torch.nn.Linear(hidden_size, output_size) for output_size in output_sizes]
+            [
+                torch.nn.Linear(hidden_sizes[-1], output_size)
+                for output_size in output_sizes
+            ]
         )
 
     def forward(self, x):
-        h1 = self.activation(
-            self.shared_layer1(
-                x,
-            )
-        )
-        h2 = self.activation(
-            self.shared_layer2(
-                h1,
-            )
-        )
-        h3 = self.activation(
-            self.shared_layer_3(
-                h2,
-            )
-        )  # batch x num_tasks x hidden_size
-        out = [layer(h3[:, i, :]) for i, layer in enumerate(self.task_layers)]
+        x = self.shared_layers(x)  # batch x num_tasks x hidden_size
+        out = [layer(x[:, i, :]) for i, layer in enumerate(self.task_layers)]
         return out
 
 
@@ -331,10 +365,17 @@ validation_dataloader_unscaled = DataLoader(validation_dataset_unscaled, batch_s
 # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
 modelList = [
     MultiTaskMLP_TTSoftshare(
-        input_size=7, hidden_size=16, output_sizes=[1, 1], tt_rank=4
+        input_size=7, hidden_sizes=[16, 16, 16], output_sizes=[1, 1], tt_rank=4
     ).to(device),
-    MultiTaskNaiveMLP(input_size=7, hidden_size=16, output_sizes=[1, 1]).to(device),
-    MultiTaskMLP(input_size=7, hidden_size=18, output_sizes=[1, 1]).to(device),
+    MultiTaskNaiveMLP(input_size=7, hidden_sizes=[16, 16, 16], output_sizes=[1, 1]).to(
+        device
+    ),
+    MultiTaskMLP(
+        input_size=7,
+        shared_hidden_sizes=[18, 18, 18],
+        task_hidden_sizes=[],
+        output_sizes=[1, 1],
+    ).to(device),
 ]
 results = {}
 for model in modelList:
