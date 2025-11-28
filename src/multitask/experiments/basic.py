@@ -99,9 +99,11 @@ class MultiTaskMLP(torch.nn.Module):
         print(self.shared_layers)
 
     def forward(self, x):
-        x = self.shared_layers(x)
+        # (batch_size, 1, input_size)
+        x = self.shared_layers(x)  # (batch_size, 1, shared_hidden_sizes[-1])
 
         outputs = [task_layers(x) for task_layers in self.task_layers]
+        # list of (batch_size, 1, output_size)
 
         return outputs
 
@@ -163,6 +165,52 @@ class SharedTTLinearLayer(torch.nn.Module):
             "bni,nio->bno", x, task_weights
         )  # (batch_size, num_tasks, output_size)
         return y
+
+
+class MultiTaskMLP_Residual(torch.nn.Module):
+    """
+    Multi-task MLP with residual shared layers.
+    """
+
+    def __init__(
+        self,
+        input_size,
+        task_hidden_sizes: list[int],
+        shared_hidden_sizes: list[int],
+        output_sizes,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = task_hidden_sizes
+        self.output_sizes = output_sizes
+        self.num_tasks = len(output_sizes)
+
+        individual_output_size = sum(output_sizes)
+        self.task_networks = torch.nn.ModuleList(
+            [
+                SingleTaskMLP(input_size, task_hidden_sizes, output_size)
+                for output_size in output_sizes
+            ]
+        )
+        self.shared_layers = SingleTaskMLP(
+            individual_output_size, shared_hidden_sizes, individual_output_size
+        )
+
+    def forward(self, x):
+        x = [
+            task_network(x) for task_network in self.task_networks
+        ]  # num tasks x (batch_size, 1, output_size)
+
+        x = torch.stack(x, dim=1)  # (batch_size, *[output_sizes], 1)
+        x = x.reshape(x.size(0), -1)  # (batch_size, sum(output_sizes))
+        shared = self.shared_layers(x)  # (batch_size, sum(output_sizes))
+        x = x + shared  # Residual connection
+
+        x = x.reshape(
+            x.size(0), self.num_tasks, -1
+        )  # (batch_size, num_tasks, output_size)
+        out = [x[:, i, :] for i in range(self.num_tasks)]
+        return out
 
 
 class MultiTaskMLP_TTSoftshare(torch.nn.Module):
@@ -364,6 +412,12 @@ validation_dataloader_unscaled = DataLoader(validation_dataset_unscaled, batch_s
 
 # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
 modelList = [
+    MultiTaskMLP_Residual(
+        input_size=7,
+        task_hidden_sizes=[16, 16],
+        shared_hidden_sizes=[16, 16],
+        output_sizes=[1, 1],
+    ).to(device),
     MultiTaskMLP_TTSoftshare(
         input_size=7, hidden_sizes=[16, 16, 16], output_sizes=[1, 1], tt_rank=4
     ).to(device),
