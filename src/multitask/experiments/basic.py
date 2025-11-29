@@ -154,14 +154,21 @@ class SharedTTLinearLayer(torch.nn.Module):
         )  # (num_tasks, in_features, out_features)
 
     def forward(
-        self, x: torch.Tensor
-    ):  # (batch_size, num_tasks, input_size) -> (batch_size, num_tasks, output_size)
+        self, x: list[torch.Tensor]
+    ) -> list[
+        torch.Tensor
+    ]:  # list of (batch_size, input_size) -> list of (batch_size, output_size)
+        x_concat = torch.stack(x, dim=1)  # (batch_size, num_tasks, input_size)
         task_weights = (
             self._get_contracted_cores()
         )  # (num_tasks, in_features, out_features)
+
         y = torch.einsum(
-            "bni,nio->bno", x, task_weights
+            "bni,nio->bno", x_concat, task_weights
         )  # (batch_size, num_tasks, output_size)
+        y = [
+            y[:, i, :] for i in range(self.num_tasks)
+        ]  # list of (batch_size, output_size)
         return y
 
 
@@ -194,7 +201,7 @@ class MultiTaskMLP_Residual(torch.nn.Module):
             individual_output_size, shared_hidden_sizes, individual_output_size
         )
 
-    def forward(self, x):
+    def forward(self, x) -> list[torch.Tensor]:
         x = [
             task_network(x) for task_network in self.task_networks
         ]  # num tasks x (batch_size, 1, output_size)
@@ -203,7 +210,7 @@ class MultiTaskMLP_Residual(torch.nn.Module):
         shared = self.shared_layers(x)  # (batch_size, 1, sum(output_sizes))
         x = x + shared  # Residual connection
         out = [
-            x[:, :, sum(self.output_sizes[:i]) : sum(self.output_sizes[: i + 1])]
+            x[:, sum(self.output_sizes[:i]) : sum(self.output_sizes[: i + 1])]
             for i in range(self.num_tasks)
         ]
         return out
@@ -229,18 +236,17 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
         self.output_sizes = output_sizes
         self.num_tasks = len(output_sizes)
 
-        shared_layers = [
-            SharedTTLinearLayer(
-                in_features=input_size,
-                out_features=hidden_sizes[0],
-                tt_rank=tt_rank,
-                num_tasks=self.num_tasks,
-            ),
-            torch.nn.ReLU(),
-        ]
+        self.in_layer = SharedTTLinearLayer(
+            in_features=input_size,
+            out_features=hidden_sizes[0],
+            tt_rank=tt_rank,
+            num_tasks=self.num_tasks,
+        )
+
+        shared_hidden_layers = []
 
         for layer in range(1, len(hidden_sizes)):
-            shared_layers.append(
+            shared_hidden_layers.append(
                 SharedTTLinearLayer(
                     in_features=hidden_sizes[layer - 1],
                     out_features=hidden_sizes[layer],
@@ -248,8 +254,7 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
                     num_tasks=self.num_tasks,
                 )
             )
-            shared_layers.append(torch.nn.ReLU())
-        self.shared_layers = torch.nn.Sequential(*(shared_layers))
+        self.shared_hidden_layers = torch.nn.ModuleList(shared_hidden_layers)
 
         self.task_layers = torch.nn.ModuleList(
             [
@@ -257,10 +262,18 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
                 for output_size in output_sizes
             ]
         )
+        self.activation = torch.nn.ReLU()
 
     def forward(self, x):
-        x = self.shared_layers(x)  # batch x num_tasks x hidden_size
-        out = [layer(x[:, i, :]) for i, layer in enumerate(self.task_layers)]
+        x = [x for _ in range(self.num_tasks)]
+        x = self.in_layer(x)
+        x = [self.activation(x_i) for x_i in x]
+
+        for layer in self.shared_hidden_layers:
+            x = layer(x)
+            x = [self.activation(x_i) for x_i in x]
+
+        out = [layer(x_i) for x_i, layer in zip(x, self.task_layers)]
         return out
 
 
@@ -320,6 +333,7 @@ def run_epoch(
     task_weights: list[float],
     optimizer: torch.optim.Optimizer | None = None,
     device=torch.device("cpu"),
+    reverse_task_scalers: list[StandardScaler] | None = None,
 ):
     """
     Run one epoch of training or evaluation.
@@ -327,6 +341,13 @@ def run_epoch(
     Returns average loss over the epoch.
     """
     is_training = optimizer is not None
+    if reverse_task_scalers is not None:
+        assert len(reverse_task_scalers) == len(
+            task_weights
+        ), "Number of reverse scalers must match number of tasks."
+        print(
+            "Running epoch with reverse scaling for interpretability on original scale."
+        )
 
     if is_training:
         model.train()
@@ -338,7 +359,7 @@ def run_epoch(
 
     for batch in dataloader:
         X = batch["X"]  # (batch_size, num_features)
-        X = X.unsqueeze(1).to(device)  # (batch_size, 1, num_features)
+        X = X.to(device)  # (batch_size, num_features)
         y = [
             batch["y"][f"task_{i}"] for i in range(len(batch["y"]))
         ]  # list of (batch_size, )
@@ -351,10 +372,29 @@ def run_epoch(
             with torch.no_grad():
                 predictions = model(X.float())
 
+        if reverse_task_scalers is not None:
+            # Reverse scaling on predictions
+            predictions = [
+                torch.tensor(
+                    reverse_task_scalers[i].inverse_transform(
+                        predictions[i].cpu().numpy()
+                    ),
+                    dtype=torch.float32,
+                ).to(device)
+                for i in range(len(predictions))
+            ]
+            y = [
+                torch.tensor(
+                    reverse_task_scalers[i].inverse_transform(y[i].cpu().numpy()),
+                    dtype=torch.float32,
+                ).to(device)
+                for i in range(len(y))
+            ]
+
         # compute per-task MSE (using the loss defined above) and sum them
         l = torch.stack(
             [
-                loss_fn(pred.squeeze(), y_i.float().to(device)) * task_weight
+                loss_fn(pred, y_i.float().to(device)) * task_weight
                 for pred, y_i, task_weight in zip(predictions, y, task_weights)
             ]
         ).mean()
@@ -414,10 +454,6 @@ train_dataset = PreScaledHFDataset(
 validation_dataset = PreScaledHFDataset(
     hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=target_scalers
 )
-validation_dataset_unscaled = PreScaledHFDataset(
-    hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=None
-)
-
 
 loss = torch.nn.MSELoss(reduction="mean")
 
@@ -425,7 +461,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
 validation_dataloader = DataLoader(validation_dataset, batch_size=128)
-validation_dataloader_unscaled = DataLoader(validation_dataset_unscaled, batch_size=128)
 
 input_size = len(features)
 output_sizes = [len(t) for t in targets]
@@ -463,7 +498,7 @@ for model in modelList:
     optimizer = optim.Adam(params=model.parameters(), lr=0.001)
     prev_train_loss = float("inf")
     prev_val_loss = float("inf")
-    t = trange(20, unit="epoch")
+    t = trange(2, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
             train_dataloader,
@@ -494,12 +529,13 @@ for model in modelList:
 
     # Validate on unscaled data for interpretability
     val_loss_unscaled = run_epoch(
-        validation_dataloader_unscaled,
+        validation_dataloader,
         model,
         loss,
         task_weights=task_weights,
         optimizer=None,
         device=device,
+        reverse_task_scalers=target_scalers,
     )
     print(
         f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled:.3f}"
