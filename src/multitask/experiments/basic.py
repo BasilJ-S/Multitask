@@ -95,8 +95,6 @@ class MultiTaskMLP(torch.nn.Module):
                     torch.nn.Linear(task_hidden_sizes[-1], output_size)
                 )
             self.task_layers.append(torch.nn.Sequential(*task_layer_list))
-        print(self.task_layers)
-        print(self.shared_layers)
 
     def forward(self, x):
         # (batch_size, 1, input_size)
@@ -201,15 +199,13 @@ class MultiTaskMLP_Residual(torch.nn.Module):
             task_network(x) for task_network in self.task_networks
         ]  # num tasks x (batch_size, 1, output_size)
 
-        x = torch.stack(x, dim=1)  # (batch_size, *[output_sizes], 1)
-        x = x.reshape(x.size(0), -1)  # (batch_size, sum(output_sizes))
-        shared = self.shared_layers(x)  # (batch_size, sum(output_sizes))
+        x = torch.cat(x, dim=-1)  # (batch_size, 1, sum(output_sizes))
+        shared = self.shared_layers(x)  # (batch_size, 1, sum(output_sizes))
         x = x + shared  # Residual connection
-
-        x = x.reshape(
-            x.size(0), self.num_tasks, -1
-        )  # (batch_size, num_tasks, output_size)
-        out = [x[:, i, :] for i in range(self.num_tasks)]
+        out = [
+            x[:, :, sum(self.output_sizes[:i]) : sum(self.output_sizes[: i + 1])]
+            for i in range(self.num_tasks)
+        ]
         return out
 
 
@@ -277,9 +273,9 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
         self,
         hf_dataset: hfDataset,
         feature_cols: list[str],
-        target_cols: list[str],
+        target_cols: list[list[str]],
         scaler_X: StandardScaler | None = None,
-        scaler_y: StandardScaler | None = None,
+        scaler_y: list[StandardScaler] | None = None,
     ):
         import numpy as np
 
@@ -288,29 +284,40 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
 
         # Convert to NumPy arrays
         X = np.stack([hf_dataset[col] for col in feature_cols], axis=1)
-        y = np.stack([hf_dataset[col] for col in target_cols], axis=1)
+
+        # Per task
+        y_overall = []
+        for i, task_targets in enumerate(target_cols):
+            y = np.stack([hf_dataset[col] for col in task_targets], axis=1)
+            if scaler_y is not None:
+                y = scaler_y[i].transform(y)
+            y_overall.append(y)
 
         # Apply scaling if provided
         if scaler_X is not None:
             X = scaler_X.transform(X)
-        if scaler_y is not None:
-            y = scaler_y.transform(y)
 
         # Store as tensors directly
         self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = torch.tensor(y, dtype=torch.float32)
+        self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]
 
     def __len__(self):
-        return len(self.y)
+        return len(self.y[0])
 
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        y = {f"task_{i}": y_task[idx] for i, y_task in enumerate(self.y)}
+        batch = {
+            "X": self.X[idx],
+            "y": y,
+        }
+        return batch
 
 
 def run_epoch(
     dataloader: DataLoader,
     model: torch.nn.Module,
     loss_fn: torch.nn.Module,
+    task_weights: list[float],
     optimizer: torch.optim.Optimizer | None = None,
     device=torch.device("cpu"),
 ):
@@ -329,24 +336,26 @@ def run_epoch(
     total_loss = 0.0
     total_samples = 0
 
-    for X, y in dataloader:
+    for batch in dataloader:
+        X = batch["X"]  # (batch_size, num_features)
         X = X.unsqueeze(1).to(device)  # (batch_size, 1, num_features)
-        y = y.to(device)
+        y = [
+            batch["y"][f"task_{i}"] for i in range(len(batch["y"]))
+        ]  # list of (batch_size, )
 
+        y = [y_i.to(device) for y_i in y]
         if is_training:
             optimizer.zero_grad()
             predictions = model(X.float())
         else:
             with torch.no_grad():
                 predictions = model(X.float())
-        # Combine predictions into a single tensor for easier handling
-        predictions = torch.cat(predictions, dim=1)
 
         # compute per-task MSE (using the loss defined above) and sum them
         l = torch.stack(
             [
-                loss_fn(pred.squeeze(), y_i.float().to(device))
-                for pred, y_i in zip(predictions, y)
+                loss_fn(pred.squeeze(), y_i.float().to(device)) * task_weight
+                for pred, y_i, task_weight in zip(predictions, y, task_weights)
             ]
         ).mean()
 
@@ -368,34 +377,42 @@ hf_train: hfDataset = ds["train"]  # type: ignore
 hf_validation: hfDataset = ds["validation"]  # type: ignore
 
 
-targets = ["MedHouseVal", "AveRooms"]
-features = [col for col in hf_train.column_names if col not in targets]
+targets = [["MedHouseVal", "AveRooms"], ["Longitude"]]
+task_weights = [1.0, 0.5]  # Weight for each task in the loss computation
+all_targets = [t for sublist in targets for t in sublist]
+features = [col for col in hf_train.column_names if col not in all_targets]
 print("Features:", features, "Targets:", targets)
 
 # Fit scalers on training data
-target_scaler = StandardScaler()
+target_scalers = [StandardScaler() for _ in targets]
 feature_scaler = StandardScaler()
 train_features = np.stack([hf_train[col] for col in features], axis=1)
-train_targets = np.stack([hf_train[col] for col in targets], axis=1)
+train_targets = [
+    np.stack([hf_train[col] for col in target_group], axis=1)
+    for target_group in targets
+]
 feature_scaler.fit(train_features)
-target_scaler.fit(train_targets)
 print(
     "Feature means:",
     feature_scaler.mean_,
     "stds:",
     feature_scaler.scale_,
-    " Target means:",
-    target_scaler.mean_,
-    "stds:",
-    target_scaler.scale_,
 )
+for scaler, target_set in zip(target_scalers, train_targets):
+    scaler.fit(target_set)
+    print(
+        f" Target means for {target_set}:",
+        scaler.mean_,
+        "stds:",
+        scaler.scale_,
+    )
 
 # Create pre-scaled datasets
 train_dataset = PreScaledHFDataset(
-    hf_train, features, targets, scaler_X=feature_scaler, scaler_y=target_scaler
+    hf_train, features, targets, scaler_X=feature_scaler, scaler_y=target_scalers
 )
 validation_dataset = PreScaledHFDataset(
-    hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=target_scaler
+    hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=target_scalers
 )
 validation_dataset_unscaled = PreScaledHFDataset(
     hf_validation, features, targets, scaler_X=feature_scaler, scaler_y=None
@@ -410,25 +427,31 @@ train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
 validation_dataloader = DataLoader(validation_dataset, batch_size=128)
 validation_dataloader_unscaled = DataLoader(validation_dataset_unscaled, batch_size=128)
 
+input_size = len(features)
+output_sizes = [len(t) for t in targets]
+
 # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
 modelList = [
     MultiTaskMLP_Residual(
-        input_size=7,
+        input_size=input_size,
         task_hidden_sizes=[16, 16],
         shared_hidden_sizes=[16, 16],
-        output_sizes=[1, 1],
+        output_sizes=output_sizes,
     ).to(device),
     MultiTaskMLP_TTSoftshare(
-        input_size=7, hidden_sizes=[16, 16, 16], output_sizes=[1, 1], tt_rank=4
+        input_size=input_size,
+        hidden_sizes=[16, 16, 16],
+        output_sizes=output_sizes,
+        tt_rank=4,
     ).to(device),
-    MultiTaskNaiveMLP(input_size=7, hidden_sizes=[16, 16, 16], output_sizes=[1, 1]).to(
-        device
-    ),
+    MultiTaskNaiveMLP(
+        input_size=input_size, hidden_sizes=[16, 16, 16], output_sizes=output_sizes
+    ).to(device),
     MultiTaskMLP(
-        input_size=7,
+        input_size=input_size,
         shared_hidden_sizes=[18, 18, 18],
         task_hidden_sizes=[],
-        output_sizes=[1, 1],
+        output_sizes=output_sizes,
     ).to(device),
 ]
 results = {}
@@ -443,11 +466,21 @@ for model in modelList:
     t = trange(20, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
-            train_dataloader, model, loss, optimizer=optimizer, device=device
+            train_dataloader,
+            model,
+            loss,
+            task_weights=task_weights,
+            optimizer=optimizer,
+            device=device,
         )
 
         val_loss = run_epoch(
-            validation_dataloader, model, loss, optimizer=None, device=device
+            validation_dataloader,
+            model,
+            loss,
+            task_weights=task_weights,
+            optimizer=None,
+            device=device,
         )
 
         results[model.__class__.__name__].append(
@@ -461,7 +494,12 @@ for model in modelList:
 
     # Validate on unscaled data for interpretability
     val_loss_unscaled = run_epoch(
-        validation_dataloader_unscaled, model, loss, optimizer=None, device=device
+        validation_dataloader_unscaled,
+        model,
+        loss,
+        task_weights=task_weights,
+        optimizer=None,
+        device=device,
     )
     print(
         f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled:.3f}"
