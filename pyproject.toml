@@ -6,8 +6,14 @@ authors = [
     {name = "BasilJ-S",email = "18bjjs@queensu.ca"}
 ]
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
+    "datasets (>=4.4.1,<5.0.0)",
+    "torch (>=2.9.1,<3.0.0)",
+    "tensorly (>=0.9.0,<0.10.0)",
+    "matplotlib (>=3.10.7,<4.0.0)",
+    "scikit-learn (>=1.7.2,<2.0.0)",
+    "pytest (>=9.0.1,<10.0.0)"
 ]
 
 [tool.poetry]
