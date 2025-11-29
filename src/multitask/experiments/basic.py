@@ -354,7 +354,7 @@ def run_epoch(
     else:
         model.eval()
 
-    total_loss = 0.0
+    total_loss = [0.0 for _ in task_weights]
     total_samples = 0
 
     for batch in dataloader:
@@ -392,21 +392,25 @@ def run_epoch(
             ]
 
         # compute per-task MSE (using the loss defined above) and sum them
-        l = torch.stack(
+        l_per_task = torch.stack(
             [
                 loss_fn(pred, y_i.float().to(device)) * task_weight
                 for pred, y_i, task_weight in zip(predictions, y, task_weights)
             ]
-        ).mean()
+        )
+
+        l = l_per_task.sum()
 
         if is_training:
             l.backward()
             optimizer.step()
 
-        total_loss += l.item() * y[0].size(0)
+        total_loss = [
+            tl + l_i.item() * y[0].size(0) for tl, l_i in zip(total_loss, l_per_task)
+        ]
         total_samples += y[0].size(0)
 
-    avg_loss = total_loss / total_samples
+    avg_loss = [tl / total_samples for tl in total_loss]
     return avg_loss
 
 
@@ -421,7 +425,10 @@ targets = [["MedHouseVal", "AveRooms"], ["Longitude"]]
 task_weights = [1.0, 0.5]  # Weight for each task in the loss computation
 all_targets = [t for sublist in targets for t in sublist]
 features = [col for col in hf_train.column_names if col not in all_targets]
-print("Features:", features, "Targets:", targets)
+
+for i, target_group in enumerate(targets):
+    print(f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}")
+
 
 # Fit scalers on training data
 target_scalers = [StandardScaler() for _ in targets]
@@ -498,7 +505,7 @@ for model in modelList:
     optimizer = optim.Adam(params=model.parameters(), lr=0.001)
     prev_train_loss = float("inf")
     prev_val_loss = float("inf")
-    t = trange(2, unit="epoch")
+    t = trange(10, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
             train_dataloader,
@@ -523,7 +530,7 @@ for model in modelList:
         )
         prev_val_loss = val_loss
         prev_train_loss = train_loss
-        message = f"Model {model.__class__.__name__} | Epoch {_epoch} | Train: {train_loss:.3f} | Val: {val_loss:.3f}"
+        message = f"Model {model.__class__.__name__} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
         t.set_description(message)
         t.write(message)
 
@@ -538,7 +545,7 @@ for model in modelList:
         reverse_task_scalers=target_scalers,
     )
     print(
-        f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled:.3f}"
+        f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled}"
     )
 
 
@@ -548,23 +555,86 @@ import matplotlib.pyplot as plt
 
 # Colour per model
 colors = ["b", "g", "r", "c", "m", "y", "k"]
+lineStyles = [
+    "-",
+    "-.",
+    "--",
+    ":",
+]
 
-for i, (model_name, result) in enumerate(results.items()):
-    epochs = [r["epoch"] for r in result]
-    train_losses = [r["train_loss"] for r in result]
-    val_losses = [r["val_loss"] for r in result]
+fig, axs = plt.subplots(1, 2, figsize=(28, 12))
 
-    plt.plot(epochs, train_losses, label=f"{model_name} Train Loss", color=colors[i])
-    plt.plot(
-        epochs,
-        val_losses,
-        label=f"{model_name} Val Loss",
-        linestyle="--",
-        color=colors[i],
-    )
 
-plt.xlabel("Epoch")
-plt.ylabel("Loss")
-plt.legend()
+def plot_loss_per_task(results, targets, ax, index, linestyles, colors):
+    for i, (model_name, result) in enumerate(results.items()):
+        epochs = [r["epoch"] for r in result]
+        train_losses = [r["train_loss"] for r in result]
+        val_losses = [r["val_loss"] for r in result]
+        for j, task in enumerate(targets):
+            task_train_losses = [tl[j] for tl in train_losses]
+            task_val_losses = [vl[j] for vl in val_losses]
+
+            axs[index].plot(
+                epochs,
+                task_train_losses,
+                label=f"{model_name} Train Loss Task {j}",
+                color=colors[i],
+                linestyle=linestyles[2 * j],
+            )
+            axs[index].plot(
+                epochs,
+                task_val_losses,
+                label=f"{model_name} Val Loss Task {j}",
+                linestyle=linestyles[2 * j - 1],
+                color=colors[i],
+            )
+    axs[index].set_title(f"Loss per Task")
+    axs[index].set_xlabel("Epoch")
+    axs[index].set_ylabel("Loss")
+    axs[index].legend()
+
+
+def plot_loss(results, axs, index, colors):
+    for i, (model_name, result) in enumerate(results.items()):
+        epochs = [r["epoch"] for r in result]
+        train_losses = [sum(r["train_loss"]) for r in result]
+        val_losses = [sum(r["val_loss"]) for r in result]
+
+        axs[index].plot(
+            epochs,
+            train_losses,
+            label=f"{model_name} Train Loss",
+            color=colors[i],
+        )
+        axs[index].plot(
+            epochs,
+            val_losses,
+            label=f"{model_name} Val Loss",
+            linestyle="--",
+            color=colors[i],
+        )
+
+    axs[index].set_title(f"Total Loss")
+    axs[index].set_xlabel("Epoch")
+    axs[index].set_ylabel("Loss")
+    axs[index].legend()
+
+
+plot_loss_per_task(results, targets, axs, 0, lineStyles, colors)
+plot_loss(results, axs, 1, colors)
+
+# Add labels describing each task for whole figure
+fig.suptitle(
+    "Multi-Task MLP Model Comparison on California Housing Dataset", fontsize=16
+)
+task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
+fig.text(
+    0.5,
+    0.04,
+    ", ".join(task_text),
+    ha="center",
+    fontsize=10,
+)
+
 plt.savefig("multitask_mlp_comparison.png")
 plt.show()
