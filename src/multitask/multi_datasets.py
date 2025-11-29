@@ -22,11 +22,11 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
         self.target_cols = target_cols
 
         # Convert to NumPy arrays
-        X = np.stack([hf_dataset[col] for col in feature_cols], axis=1)
+        X = np.stack([hf_dataset[col] for col in self.feature_cols], axis=1)
 
         # Per task
         y_overall = []
-        for i, task_targets in enumerate(target_cols):
+        for i, task_targets in enumerate(self.target_cols):
             y = np.stack([hf_dataset[col] for col in task_targets], axis=1)
             if scaler_y is not None:
                 y = scaler_y[i].transform(y)
@@ -40,10 +40,12 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.y[0])
 
-    def __getitem__(self, idx):
+    def __getitem__(
+        self, idx: int
+    ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
         y = {f"task_{i}": y_task[idx] for i, y_task in enumerate(self.y)}
         batch = {
             "X": self.X[idx],

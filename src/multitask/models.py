@@ -2,47 +2,66 @@ import torch
 
 
 class SingleTaskMLP(torch.nn.Module):
-    def __init__(self, input_size, hidden_sizes, output_size):
+    """A basic single-task MLP model."""
+
+    def __init__(
+        self, input_size: int, hidden_sizes: list[int], output_size: int
+    ) -> None:
         super().__init__()
         self.input_size = input_size
         self.hidden_sizes = hidden_sizes
         self.output_size = output_size
 
-        layers = [torch.nn.Linear(input_size, hidden_sizes[0]), torch.nn.ReLU()]
-        for i in range(1, len(hidden_sizes)):
-            layers.append(torch.nn.Linear(hidden_sizes[i - 1], hidden_sizes[i]))
+        layers = [
+            torch.nn.Linear(self.input_size, self.hidden_sizes[0]),
+            torch.nn.ReLU(),
+        ]
+        for i in range(1, len(self.hidden_sizes)):
+            layers.append(
+                torch.nn.Linear(self.hidden_sizes[i - 1], self.hidden_sizes[i])
+            )
             layers.append(torch.nn.ReLU())
-        layers.append(torch.nn.Linear(hidden_sizes[-1], output_size))
+        layers.append(torch.nn.Linear(self.hidden_sizes[-1], self.output_size))
         self.network = torch.nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.network(x)
         return x
 
 
 class MultiTaskNaiveMLP(torch.nn.Module):
-    def __init__(self, input_size, hidden_sizes, output_sizes):
+    """Naive MLP with no parameter sharing between tasks."""
+
+    def __init__(
+        self, input_size: int, hidden_sizes: list[int], output_sizes: list[int]
+    ) -> None:
         super().__init__()
+        self.input_size = input_size
+        self.hidden_sizes = hidden_sizes
+        self.output_sizes = output_sizes
+
         self.models = torch.nn.ModuleList(
             [
-                SingleTaskMLP(input_size, hidden_sizes, output_size)
-                for output_size in output_sizes
+                SingleTaskMLP(self.input_size, self.hidden_sizes, output_size)
+                for output_size in self.output_sizes
             ]
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         outputs = [model(x) for model in self.models]
         return outputs
 
 
-class MultiTaskMLP(torch.nn.Module):
+class MultiTaskHardShareMLP(torch.nn.Module):
+    """Hard parameter sharing multi-task MLP. Has shared initial layers and task-specific output layers."""
+
     def __init__(
         self,
-        input_size,
-        shared_hidden_sizes,
-        task_hidden_sizes,
-        output_sizes,
-    ):
+        input_size: int,
+        shared_hidden_sizes: list[int],
+        task_hidden_sizes: list[int],
+        output_sizes: list[int],
+    ) -> None:
         super().__init__()
         self.input_size = input_size
         self.shared_hidden_sizes = shared_hidden_sizes
@@ -50,66 +69,70 @@ class MultiTaskMLP(torch.nn.Module):
         self.output_sizes = output_sizes
 
         shared_layers = [
-            torch.nn.Linear(input_size, shared_hidden_sizes[0]),
+            torch.nn.Linear(self.input_size, self.shared_hidden_sizes[0]),
             torch.nn.ReLU(),
         ]
-        for i in range(1, len(shared_hidden_sizes)):
+        for i in range(1, len(self.shared_hidden_sizes)):
             shared_layers.append(
-                torch.nn.Linear(shared_hidden_sizes[i - 1], shared_hidden_sizes[i])
+                torch.nn.Linear(
+                    self.shared_hidden_sizes[i - 1], self.shared_hidden_sizes[i]
+                )
             )
             shared_layers.append(torch.nn.ReLU())
         self.shared_layers = torch.nn.Sequential(*(shared_layers))
 
         self.task_layers = torch.nn.ModuleList()
 
-        for output_size in output_sizes:
+        for output_size in self.output_sizes:
             task_layer_list = []
-            if len(task_hidden_sizes) == 0:
+            if len(self.task_hidden_sizes) == 0:
                 # No task-specific hidden layers
                 task_layer_list.append(
-                    torch.nn.Linear(shared_hidden_sizes[-1], output_size)
+                    torch.nn.Linear(self.shared_hidden_sizes[-1], output_size)
                 )
             else:
                 # Task-specific hidden layers
                 task_layer_list.append(
-                    torch.nn.Linear(shared_hidden_sizes[-1], task_hidden_sizes[0])
+                    torch.nn.Linear(
+                        self.shared_hidden_sizes[-1], self.task_hidden_sizes[0]
+                    )
                 )
                 task_layer_list.append(torch.nn.ReLU())
 
-                for i in range(1, len(task_hidden_sizes)):
+                for i in range(1, len(self.task_hidden_sizes)):
                     task_layer_list.append(
-                        torch.nn.Linear(task_hidden_sizes[i - 1], task_hidden_sizes[i])
+                        torch.nn.Linear(
+                            self.task_hidden_sizes[i - 1], self.task_hidden_sizes[i]
+                        )
                     )
                     task_layer_list.append(torch.nn.ReLU())
                 task_layer_list.append(
-                    torch.nn.Linear(task_hidden_sizes[-1], output_size)
+                    torch.nn.Linear(self.task_hidden_sizes[-1], output_size)
                 )
             self.task_layers.append(torch.nn.Sequential(*task_layer_list))
 
-    def forward(self, x):
-        # (batch_size, 1, input_size)
-        x = self.shared_layers(x)  # (batch_size, 1, shared_hidden_sizes[-1])
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        # (batch_size, input_size)
+        x = self.shared_layers(x)  # (batch_size, shared_hidden_sizes[-1])
 
         outputs = [task_layers(x) for task_layers in self.task_layers]
-        # list of (batch_size, 1, output_size)
-
+        # list of (batch_size, output_size)
         return outputs
 
 
-class SharedTTLinearLayer(torch.nn.Module):
+class MultiTaskTTSoftShareLinear(torch.nn.Module):
+    """
+    Shared TT layer for multi-task learning. Weights are represented in tensor train format
+    with shared cores and task specific cores.
+    """
+
     def __init__(
         self,
-        in_features,
-        out_features,
+        in_features: int,
+        out_features: int,
         num_tasks: int,
         tt_rank: int,
-    ):
-        """
-        Shared TT layer for multi-task learning.
-        shape: tuple, shape of the weight matrix to be represented in TT format
-        tt_rank: int, TT rank, assumed to be the same for all cores for simplicity
-        num_tasks: int, number of tasks
-        """
+    ) -> None:
         super().__init__()
 
         self.num_tasks = num_tasks
@@ -117,29 +140,30 @@ class SharedTTLinearLayer(torch.nn.Module):
         self.out_features = out_features
         self.tt_rank = tt_rank
 
-        # Scalinig factor for initialization to keep variance small
+        # Scaling factor for initialization to keep variance small
+        self.variance_scale = 0.1
 
-        # --- Shared TT first core (core 0) ---
-        self.first_shared_core = torch.nn.Parameter(
-            torch.randn(num_tasks, tt_rank) * 0.1
+        self.task_core = torch.nn.Parameter(
+            torch.randn(self.num_tasks, self.tt_rank) * self.variance_scale
         )
 
-        # --- Shared TT cores (core 2)
-        self.middle_shared_core = torch.nn.Parameter(
-            torch.randn(tt_rank, in_features, tt_rank) * 0.1
+        self.in_core = torch.nn.Parameter(
+            torch.randn(self.tt_rank, self.in_features, self.tt_rank)
+            * self.variance_scale
         )
 
-        # --- Task-specific last core (core 3) ---
-        self.task_core = torch.nn.Parameter(torch.randn(tt_rank, out_features) * 0.1)
+        self.out_core = torch.nn.Parameter(
+            torch.randn(self.tt_rank, self.out_features) * self.variance_scale
+        )
 
     def _get_contracted_cores(self):
         # cores = [U1, U2, ..., UN]
-        W = self.first_shared_core  # (num_tasks, tt_rank)
+        W = self.task_core  # (num_tasks, tt_rank)
         W = torch.einsum(
-            "ij,jkl->ikl", W, self.middle_shared_core
+            "ij,jkl->ikl", W, self.in_core
         )  # (num_tasks, in_features, tt_rank)
         return torch.einsum(
-            "ijk,kl->ijl", W, self.task_core
+            "ijk,kl->ijl", W, self.out_core
         )  # (num_tasks, in_features, out_features)
 
     def forward(
@@ -161,51 +185,7 @@ class SharedTTLinearLayer(torch.nn.Module):
         return y
 
 
-class MultiTaskMLP_Residual(torch.nn.Module):
-    """
-    Multi-task MLP with residual shared layers.
-    """
-
-    def __init__(
-        self,
-        input_size,
-        task_hidden_sizes: list[int],
-        shared_hidden_sizes: list[int],
-        output_sizes,
-    ):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = task_hidden_sizes
-        self.output_sizes = output_sizes
-        self.num_tasks = len(output_sizes)
-
-        individual_output_size = sum(output_sizes)
-        self.task_networks = torch.nn.ModuleList(
-            [
-                SingleTaskMLP(input_size, task_hidden_sizes, output_size)
-                for output_size in output_sizes
-            ]
-        )
-        self.shared_layers = SingleTaskMLP(
-            individual_output_size, shared_hidden_sizes, individual_output_size
-        )
-
-    def forward(self, x) -> list[torch.Tensor]:
-        x = [
-            task_network(x) for task_network in self.task_networks
-        ]  # num tasks x (batch_size, 1, output_size)
-
-        x = torch.cat(x, dim=-1)  # (batch_size, 1, sum(output_sizes))
-        shared = self.shared_layers(x)  # (batch_size, 1, sum(output_sizes))
-        x = x + shared  # Residual connection
-        out = [
-            x[:, sum(self.output_sizes[:i]) : sum(self.output_sizes[: i + 1])]
-            for i in range(self.num_tasks)
-        ]
-        return out
-
-
-class MultiTaskMLP_TTSoftshare(torch.nn.Module):
+class MultiTaskTTSoftShareMLP(torch.nn.Module):
     """
     Multi-task MLP with TT-soft sharing layers.
     Only one task specific layer to project to output size of each task.
@@ -214,31 +194,31 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
 
     def __init__(
         self,
-        input_size,
+        input_size: int,
         hidden_sizes: list[int],
-        output_sizes,
+        output_sizes: list[int],
         tt_rank=4,
     ):
         super().__init__()
         self.input_size = input_size
-        self.hidden_size = hidden_sizes
+        self.hidden_sizes = hidden_sizes
         self.output_sizes = output_sizes
         self.num_tasks = len(output_sizes)
 
-        self.in_layer = SharedTTLinearLayer(
-            in_features=input_size,
-            out_features=hidden_sizes[0],
+        self.in_layer = MultiTaskTTSoftShareLinear(
+            in_features=self.input_size,
+            out_features=self.hidden_sizes[0],
             tt_rank=tt_rank,
             num_tasks=self.num_tasks,
         )
 
         shared_hidden_layers = []
 
-        for layer in range(1, len(hidden_sizes)):
+        for layer in range(1, len(self.hidden_sizes)):
             shared_hidden_layers.append(
-                SharedTTLinearLayer(
-                    in_features=hidden_sizes[layer - 1],
-                    out_features=hidden_sizes[layer],
+                MultiTaskTTSoftShareLinear(
+                    in_features=self.hidden_sizes[layer - 1],
+                    out_features=self.hidden_sizes[layer],
                     tt_rank=tt_rank,
                     num_tasks=self.num_tasks,
                 )
@@ -247,20 +227,64 @@ class MultiTaskMLP_TTSoftshare(torch.nn.Module):
 
         self.task_layers = torch.nn.ModuleList(
             [
-                torch.nn.Linear(hidden_sizes[-1], output_size)
-                for output_size in output_sizes
+                torch.nn.Linear(self.hidden_sizes[-1], output_size)
+                for output_size in self.output_sizes
             ]
         )
         self.activation = torch.nn.ReLU()
 
-    def forward(self, x):
-        x = [x for _ in range(self.num_tasks)]
-        x = self.in_layer(x)
-        x = [self.activation(x_i) for x_i in x]
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x_list = [x for _ in range(self.num_tasks)]
+        x_list = self.in_layer(x_list)
+        x_list = [self.activation(x_i) for x_i in x_list]
 
         for layer in self.shared_hidden_layers:
-            x = layer(x)
-            x = [self.activation(x_i) for x_i in x]
+            x_list = layer(x_list)
+            x_list = [self.activation(x_i) for x_i in x_list]
+        out = [layer(x_i) for x_i, layer in zip(x_list, self.task_layers)]
+        return out
 
-        out = [layer(x_i) for x_i, layer in zip(x, self.task_layers)]
+
+class MultiTaskResidualNetwork(torch.nn.Module):
+    """
+    Multi-task network with residual shared layers and task-specific MLPs.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        task_hidden_sizes: list[int],
+        shared_hidden_sizes: list[int],
+        output_sizes: list[int],
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.task_hidden_sizes = task_hidden_sizes
+        self.shared_hidden_sizes = shared_hidden_sizes
+        self.output_sizes = output_sizes
+        self.num_tasks = len(output_sizes)
+
+        individual_output_size = sum(output_sizes)
+        self.task_networks = torch.nn.ModuleList(
+            [
+                SingleTaskMLP(self.input_size, self.task_hidden_sizes, output_size)
+                for output_size in self.output_sizes
+            ]
+        )
+        self.shared_layers = SingleTaskMLP(
+            individual_output_size, self.shared_hidden_sizes, individual_output_size
+        )
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x_list = [
+            task_network(x) for task_network in self.task_networks
+        ]  # num tasks x (batch_size, output_size)
+
+        x = torch.cat(x_list, dim=-1)  # (batch_size, sum(output_sizes))
+        shared = self.shared_layers(x)  # (batch_size, sum(output_sizes))
+        x = x + shared  # Residual connection
+        out = [
+            x[:, sum(self.output_sizes[:i]) : sum(self.output_sizes[: i + 1])]
+            for i in range(self.num_tasks)
+        ]  # list of (batch_size, output_size)
         return out

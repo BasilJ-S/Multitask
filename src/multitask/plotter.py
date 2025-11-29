@@ -1,3 +1,5 @@
+from typing import Any
+
 import matplotlib.pyplot as plt
 
 PLOT_COLOURS = ["b", "g", "r", "c", "m", "y", "k"]
@@ -10,8 +12,13 @@ PLOT_LINESTYLES = [
 
 
 def plot_loss_per_task(
-    results, targets, axs, index, linestyles=PLOT_LINESTYLES, colors=PLOT_COLOURS
-):
+    results: dict[str, list[dict[str, Any]]],
+    targets: list[list[str]],
+    axs: Any,
+    index: int,
+    linestyles: list[str] = PLOT_LINESTYLES,
+    colors: list[str] = PLOT_COLOURS,
+) -> None:
     for i, (model_name, result) in enumerate(results.items()):
         epochs = [r["epoch"] for r in result]
         train_losses = [r["train_loss"] for r in result]
@@ -31,7 +38,7 @@ def plot_loss_per_task(
                 epochs,
                 task_val_losses,
                 label=f"{model_name} Val Loss Task {j}",
-                linestyle=linestyles[2 * j - 1],
+                linestyle=linestyles[2 * j + 1],
                 color=colors[i],
             )
     axs[index].set_title(f"Loss per Task")
@@ -40,7 +47,12 @@ def plot_loss_per_task(
     axs[index].legend()
 
 
-def plot_loss(results, axs, index, colors=PLOT_COLOURS):
+def plot_loss(
+    results: dict[str, list[dict[str, Any]]],
+    axs: Any,
+    index: int,
+    colors: list[str] = PLOT_COLOURS,
+) -> None:
     for i, (model_name, result) in enumerate(results.items()):
         epochs = [r["epoch"] for r in result]
         train_losses = [sum(r["train_loss"]) for r in result]
