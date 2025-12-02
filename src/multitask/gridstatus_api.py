@@ -23,6 +23,13 @@ ERCOT_NODES = [
     "SANDHSYD_CC1",
 ]
 
+EXCLUDED_NODES = [
+    "GIGA_ESS_RN"
+]  # This has less data available, so not included in first round of tests
+# This will eventually be a good example of a node with sparse data for testing
+
+PREDICTION_NODES = [node for node in ERCOT_NODES if node not in EXCLUDED_NODES]
+
 TABLES_TO_PULL = {
     "ercot_standardized_hourly": {},
     "ercot_spp_dart_15_min": {
@@ -54,8 +61,8 @@ def load_gridstatusio_data(
     # Fetch data
     data = gf_client.get_dataset(
         dataset=table,
-        start=start_date,
-        end=end_date,
+        start=start_date,  # type: ignore
+        end=end_date,  # type: ignore
         columns=columns,
         filter_column=filter_column,
         filter_value=filter_value,
