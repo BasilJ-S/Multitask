@@ -9,6 +9,7 @@ from models import (
     MultiTaskNaiveMLP,
     MultiTaskResidualNetwork,
     MultiTaskTTSoftShareMLP,
+    NaiveMultiTaskTimeseriesWrapper,
 )
 from multi_datasets import PreScaledHFDataset
 from plotter import plot_loss, plot_loss_per_task
@@ -50,11 +51,13 @@ def run_epoch(
     total_samples = 0
 
     for batch in dataloader:
-        X = batch["X"]  # (batch_size, num_features)
-        X = X.to(device)  # (batch_size, num_features)
+        X = batch[
+            "X"
+        ]  # (batch_size, num_features) or (batch_size, seq_len, num_features)
+        X = X.to(device)
         y = [
             batch["y"][f"task_{i}"] for i in range(len(batch["y"]))
-        ]  # list of (batch_size, )
+        ]  # list of (batch_size, target_size) or (batch_size, forecast_length, target_size)
 
         y = [y_i.to(device) for y_i in y]
         if is_training:
@@ -66,22 +69,37 @@ def run_epoch(
 
         if reverse_task_scalers is not None:
             # Reverse scaling on predictions
-            predictions = [
-                torch.tensor(
-                    reverse_task_scalers[i].inverse_transform(
-                        predictions[i].cpu().numpy()
-                    ),
-                    dtype=torch.float32,
-                ).to(device)
-                for i in range(len(predictions))
-            ]
-            y = [
-                torch.tensor(
-                    reverse_task_scalers[i].inverse_transform(y[i].cpu().numpy()),
-                    dtype=torch.float32,
-                ).to(device)
-                for i in range(len(y))
-            ]
+            for task in range(len(predictions)):
+                logger.debug(
+                    f"Predictions for task {task} before inverse scaling: {predictions[task].shape}"
+                )
+                task_predictions_unscaled = [
+                    torch.tensor(
+                        reverse_task_scalers[task].inverse_transform(
+                            predictions[task][i, :, :].cpu().numpy()
+                        ),
+                        dtype=torch.float32,
+                    ).to(device)
+                    for i in range(predictions[task].shape[0])
+                ]
+                task_predictions_unscaled = torch.stack(task_predictions_unscaled)
+                logger.debug(
+                    f"Predictions for task {task} after inverse scaling: {task_predictions_unscaled.shape}"
+                )
+                predictions[task] = task_predictions_unscaled
+                logger.debug(f"Targets before inverse scaling: {y[task].shape}")
+                task_y_unscaled = [
+                    torch.tensor(
+                        reverse_task_scalers[task].inverse_transform(
+                            y[task][i, :, :].cpu().numpy()
+                        ),
+                        dtype=torch.float32,
+                    ).to(device)
+                    for i in range(y[task].shape[0])
+                ]
+                task_y_unscaled = torch.stack(task_y_unscaled)
+                logger.debug(f"Targets after inverse scaling: {task_y_unscaled.shape}")
+                y[task] = task_y_unscaled
 
         # compute per-task MSE (using the loss defined above) and sum them
         l_per_task = torch.stack(
@@ -106,8 +124,7 @@ def run_epoch(
     return avg_loss
 
 
-if __name__ == "__main__":
-    # ---- LOAD DATASET ----
+def prepare_housing_dataset(device=torch.device("cpu")):
     ds = load_dataset("gvlassis/california_housing").with_format("torch")
 
     hf_train: hfDataset = ds["train"]  # type: ignore
@@ -136,46 +153,79 @@ if __name__ == "__main__":
         scaler_X=feature_scaler,
         scaler_y=target_scalers,
     )
-
-    loss = torch.nn.MSELoss(reduction="mean")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    validation_dataloader = DataLoader(validation_dataset, batch_size=128)
-
     input_size = len(features)
     output_sizes = [len(t) for t in targets]
 
     # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
     modelList = [
-        MultiTaskResidualNetwork(
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskResidualNetwork,
             input_size=input_size,
             task_hidden_sizes=[16, 16],
             shared_hidden_sizes=[16, 16],
             output_sizes=output_sizes,
         ).to(device),
-        MultiTaskTTSoftShareMLP(
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskTTSoftShareMLP,
             input_size=input_size,
             hidden_sizes=[16, 16, 16],
             output_sizes=output_sizes,
             tt_rank=4,
         ).to(device),
-        MultiTaskNaiveMLP(
-            input_size=input_size, hidden_sizes=[16, 16, 16], output_sizes=output_sizes
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskNaiveMLP,
+            input_size=input_size,
+            output_sizes=output_sizes,
+            hidden_sizes=[16, 16, 16],
         ).to(device),
-        MultiTaskHardShareMLP(
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskHardShareMLP,
             input_size=input_size,
             shared_hidden_sizes=[18, 18, 18],
             task_hidden_sizes=[],
             output_sizes=output_sizes,
         ).to(device),
     ]
+    return (
+        train_dataset,
+        validation_dataset,
+        features,
+        targets,
+        task_weights,
+        target_scalers,
+        modelList,
+    )
+
+
+def get_model_name(model: torch.nn.Module) -> str:
+    if isinstance(model, NaiveMultiTaskTimeseriesWrapper):
+        return f"NaiveMultiTaskTimeseriesWrapper({model.model.__class__.__name__})"
+    return model.__class__.__name__
+
+
+if __name__ == "__main__":
+    # ---- LOAD DATASET ----
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    (
+        train_dataset,
+        validation_dataset,
+        features,
+        targets,
+        task_weights,
+        target_scalers,
+        modelList,
+    ) = prepare_housing_dataset(device=device)
+
+    loss = torch.nn.MSELoss(reduction="mean")
+
+    train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+    validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+
     results = {}
     for model in modelList:
-        results[model.__class__.__name__] = []
+        results[get_model_name(model)] = []
         logger.info(
-            f"Training model: {model.__class__.__name__} with {sum(p.numel() for p in model.parameters())} parameters"
+            f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
         )
         optimizer = optim.Adam(params=model.parameters(), lr=0.001)
         t = trange(10, unit="epoch")
@@ -198,10 +248,10 @@ if __name__ == "__main__":
                 device=device,
             )
 
-            results[model.__class__.__name__].append(
+            results[get_model_name(model)].append(
                 {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
             )
-            message = f"Model {model.__class__.__name__} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
+            message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
             t.set_description(message)
             t.write(message)
 
@@ -216,7 +266,7 @@ if __name__ == "__main__":
         reverse_task_scalers=target_scalers,
     )
     logger.info(
-        f"Final unscaled validation MSE for model {model.__class__.__name__}: {val_loss_unscaled}"
+        f"Final unscaled validation MSE for model {get_model_name(model)}: {val_loss_unscaled}"
     )
 
     # ---- PLOT RESULTS ----
