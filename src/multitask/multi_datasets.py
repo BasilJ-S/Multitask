@@ -53,35 +53,33 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
         # Convert to NumPy arrays
         X = np.stack([hf_dataset[col] for col in self.feature_cols], axis=1)
 
+        if create_scalers and (scaler_X is not None or scaler_y is not None):
+            raise ValueError(
+                "Cannot create scalers and use provided scalers at the same time."
+            )
+
         # Per task
         y_overall = []
         y_created_scalers = []
         for i, task_targets in enumerate(self.target_cols):
             y = np.stack([hf_dataset[col] for col in task_targets], axis=1)
-            if create_scalers and scaler_y is None:
+            if create_scalers:
                 scaler = StandardScaler()
                 scaler.fit(y)
                 y_created_scalers.append(scaler)
                 y = scaler.transform(y)
             elif scaler_y is not None:
                 y = scaler_y[i].transform(y)
-            elif scaler_y is not None and create_scalers:
-                raise ValueError(
-                    "Cannot create y scalers and use provided scalers at the same time."
-                )
+
             y_overall.append(y)
         # Apply scaling if provided
         created_scaler_x = None
-        if create_scalers and scaler_X is None:
+        if create_scalers:
             created_scaler_x = StandardScaler()
             created_scaler_x.fit(X)
             X = created_scaler_x.transform(X)
         elif scaler_X is not None:
             X = scaler_X.transform(X)
-        elif scaler_X is not None and create_scalers:
-            raise ValueError(
-                "Cannot create X scaler and use provided scaler at the same time."
-            )
 
         # Store as tensors directly
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -127,6 +125,17 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         )
 
         self.inference_and_prediction_intervals = inference_and_prediction_intervals
+        assert (
+            timeseries.index.is_monotonic_increasing
+        ), "Timeseries index must be sorted."
+        assert (
+            inference_and_prediction_intervals.index.is_monotonic_increasing
+        ), "Inference and prediction intervals index must be sorted."
+        if create_scalers and (scaler_X is not None or scaler_y is not None):
+            raise ValueError(
+                "Cannot create scalers and use provided scalers at the same time."
+            )
+
         self.timeseries_date_to_index = {
             date: idx for idx, date in enumerate(timeseries.index)
         }
@@ -144,30 +153,22 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         y_created_scalers = []
         for i, task_targets in enumerate(self.target_cols):
             y = ys[i]
-            if create_scalers and scaler_y is None:
+            if create_scalers:
                 scaler = StandardScaler()
                 scaler.fit(y)
                 y_created_scalers.append(scaler)
                 y = scaler.transform(y)
             elif scaler_y is not None:
                 y = scaler_y[i].transform(y)
-            elif scaler_y is not None and create_scalers:
-                raise ValueError(
-                    "Cannot create y scalers and use provided scalers at the same time."
-                )
             y_overall.append(y)
 
         created_scaler_x = None
-        if create_scalers and scaler_X is None:
+        if create_scalers:
             created_scaler_x = StandardScaler()
             created_scaler_x.fit(X)
             X = created_scaler_x.transform(X)
         elif scaler_X is not None:
             X = scaler_X.transform(X)
-        elif scaler_X is not None and create_scalers:
-            raise ValueError(
-                "Cannot create X scaler and use provided scaler at the same time."
-            )
 
         # Store as tensors directly
         self.X = torch.tensor(X, dtype=torch.float32)
