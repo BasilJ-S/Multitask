@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 from datasets import Dataset as hfDataset
+from datasets import load_dataset
 from gridstatus_api import PREDICTION_NODES
 from logger import logger
 from sklearn.preprocessing import StandardScaler
@@ -43,6 +44,7 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
         target_cols: list[list[str]],
         scaler_X: StandardScaler | None = None,
         scaler_y: list[StandardScaler] | None = None,
+        create_scalers: bool = False,
     ):
 
         self.feature_cols = feature_cols
@@ -53,19 +55,40 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
 
         # Per task
         y_overall = []
+        y_created_scalers = []
         for i, task_targets in enumerate(self.target_cols):
             y = np.stack([hf_dataset[col] for col in task_targets], axis=1)
-            if scaler_y is not None:
+            if create_scalers and scaler_y is None:
+                scaler = StandardScaler()
+                scaler.fit(y)
+                y_created_scalers.append(scaler)
+                y = scaler.transform(y)
+            elif scaler_y is not None:
                 y = scaler_y[i].transform(y)
+            elif scaler_y is not None and create_scalers:
+                raise ValueError(
+                    "Cannot create y scalers and use provided scalers at the same time."
+                )
             y_overall.append(y)
-
         # Apply scaling if provided
-        if scaler_X is not None:
+        created_scaler_x = None
+        if create_scalers and scaler_X is None:
+            created_scaler_x = StandardScaler()
+            created_scaler_x.fit(X)
+            X = created_scaler_x.transform(X)
+        elif scaler_X is not None:
             X = scaler_X.transform(X)
+        elif scaler_X is not None and create_scalers:
+            raise ValueError(
+                "Cannot create X scaler and use provided scaler at the same time."
+            )
 
         # Store as tensors directly
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]
+
+        self.scaler_X = created_scaler_x if create_scalers else scaler_X
+        self.scaler_y = y_created_scalers if create_scalers else scaler_y
 
     def __len__(self) -> int:
         return len(self.y[0])
@@ -93,13 +116,15 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         feature_cols: list[str],
         target_cols: list[list[str]],
         scaler_X: StandardScaler | None = None,
-        scaler_y: (
-            list[StandardScaler] | None
-        ) = None,  # TODO: Add option to return scalers
+        scaler_y: list[StandardScaler] | None = None,
+        create_scalers: bool = False,
     ):
 
         self.feature_cols = feature_cols
         self.target_cols = target_cols
+        logger.info(
+            f"Target columns: {self.target_cols}, feature columns: {self.feature_cols}"
+        )
 
         self.inference_and_prediction_intervals = inference_and_prediction_intervals
         self.timeseries_date_to_index = {
@@ -116,19 +141,40 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
 
         # Per task
         y_overall = []
+        y_created_scalers = []
         for i, task_targets in enumerate(self.target_cols):
             y = ys[i]
-            if scaler_y is not None:
+            if create_scalers and scaler_y is None:
+                scaler = StandardScaler()
+                scaler.fit(y)
+                y_created_scalers.append(scaler)
+                y = scaler.transform(y)
+            elif scaler_y is not None:
                 y = scaler_y[i].transform(y)
+            elif scaler_y is not None and create_scalers:
+                raise ValueError(
+                    "Cannot create y scalers and use provided scalers at the same time."
+                )
             y_overall.append(y)
 
-        # Apply scaling if provided
-        if scaler_X is not None:
+        created_scaler_x = None
+        if create_scalers and scaler_X is None:
+            created_scaler_x = StandardScaler()
+            created_scaler_x.fit(X)
+            X = created_scaler_x.transform(X)
+        elif scaler_X is not None:
             X = scaler_X.transform(X)
+        elif scaler_X is not None and create_scalers:
+            raise ValueError(
+                "Cannot create X scaler and use provided scaler at the same time."
+            )
 
         # Store as tensors directly
         self.X = torch.tensor(X, dtype=torch.float32)
         self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]
+
+        self.scaler_X = created_scaler_x if create_scalers else scaler_X
+        self.scaler_y = y_created_scalers if create_scalers else scaler_y
 
     def __len__(self) -> int:
         return len(self.inference_and_prediction_intervals)
@@ -206,14 +252,19 @@ if __name__ == "__main__":
     )
 
     target_cols = [[f"spp_{prediction_node}"] for prediction_node in PREDICTION_NODES]
+    all_targets = [t for sublist in target_cols for t in sublist]
 
     dataset = PreScaledTimeseriesDataset(
         timeseries=dataframe,
         inference_and_prediction_intervals=inference_prediction_intervals,
         feature_cols=[
-            col for col in dataframe.columns if col not in PREDICTION_NODES
+            col for col in dataframe.columns if col not in all_targets
         ],  # Replace with actual feature columns
         target_cols=target_cols,
+        create_scalers=False,
+    )
+    logger.info(
+        f"Scalers created: X scaler: {dataset.scaler_X is not None}, y scalers: {[s is not None for s in dataset.scaler_y] if dataset.scaler_y else None}"
     )
 
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=False)
@@ -223,4 +274,18 @@ if __name__ == "__main__":
         logger.info(f"y shape: {shapes_y}")
         break
 
+    hf_ds = load_dataset("gvlassis/california_housing").with_format("torch")
+
+    hf_train: hfDataset = hf_ds["train"]  # type: ignore
+    train_dataset = PreScaledHFDataset(
+        hf_train,
+        feature_cols=[
+            col for col in hf_train.column_names if col not in ["MedHouseVal"]
+        ],
+        target_cols=[["MedHouseVal"], ["AveRooms"]],
+        create_scalers=True,
+    )
+    logger.info(
+        f"Scalers created: X scaler: {train_dataset.scaler_X is not None}, y scalers: {[s is not None for s in train_dataset.scaler_y] if train_dataset.scaler_y else None}"
+    )
 # %%
