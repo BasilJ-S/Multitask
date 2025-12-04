@@ -105,6 +105,7 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
 class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
     """
     Dataset wrapper for Hugging Face datasets that applies pre-scaling to features and targets.
+    Assumes hourly data with contiguous datetime index.
     """
 
     def __init__(
@@ -116,13 +117,19 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         scaler_X: StandardScaler | None = None,
         scaler_y: list[StandardScaler] | None = None,
         create_scalers: bool = False,
+        context_window_hours: int = 7 * 24,
+        prediction_horizon_hours: int = 24,
     ):
 
         self.feature_cols = feature_cols
         self.target_cols = target_cols
+        self.context_window_hours = context_window_hours
+        self.prediction_horizon_hours = prediction_horizon_hours
         logger.info(
             f"Target columns: {self.target_cols}, feature columns: {self.feature_cols}"
         )
+        self.min_date = timeseries.index.min()
+        self.max_date = timeseries.index.max()
 
         self.inference_and_prediction_intervals = inference_and_prediction_intervals
         assert (
@@ -176,6 +183,33 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
 
         self.scaler_X = created_scaler_x if create_scalers else scaler_X
         self.scaler_y = y_created_scalers if create_scalers else scaler_y
+        self.validate_indices()
+
+    def validate_indices(self):
+        for idx, row in self.inference_and_prediction_intervals.iterrows():
+            inference_date = row["inference_time_utc"]
+            prediction_date = row["prediction_day_start_utc"]
+            if inference_date not in self.timeseries_date_to_index:
+                raise ValueError(f"Inference date {inference_date} not in timeseries.")
+            if prediction_date not in self.timeseries_date_to_index:
+                raise ValueError(
+                    f"Prediction date {prediction_date} not in timeseries."
+                )
+
+        if (
+            inference_date - self.context_window_hours * dt.timedelta(hours=1)
+            < self.min_date
+        ):
+            raise ValueError(
+                f"Not enough context data for inference date {inference_date}."
+            )
+        if (
+            prediction_date + self.prediction_horizon_hours * dt.timedelta(hours=1)
+            > self.max_date
+        ):
+            raise ValueError(
+                f"Not enough prediction data for prediction date {prediction_date}."
+            )
 
     def __len__(self) -> int:
         return len(self.inference_and_prediction_intervals)
@@ -196,12 +230,14 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         )
 
         y = {
-            f"task_{i}": y_task[prediction_idx : prediction_idx + 24]
+            f"task_{i}": y_task[
+                prediction_idx : prediction_idx + self.prediction_horizon_hours
+            ]
             for i, y_task in enumerate(self.y)
         }
 
         batch = {
-            "X": self.X[inference_idx - (7 * 24) : inference_idx],
+            "X": self.X[inference_idx - self.context_window_hours : inference_idx],
             "y": y,
         }
         return batch
