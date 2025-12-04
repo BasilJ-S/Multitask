@@ -13,7 +13,9 @@ dependencies = [
     "tensorly (>=0.9.0,<0.10.0)",
     "matplotlib (>=3.10.7,<4.0.0)",
     "scikit-learn (>=1.7.2,<2.0.0)",
-    "pytest (>=9.0.1,<10.0.0)"
+    "pytest (>=9.0.1,<10.0.0)",
+    "gridstatusio (>=0.15.0,<0.16.0)",
+    "keyring (>=25.7.0,<26.0.0)"
 ]
 
 [tool.poetry]
