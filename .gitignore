@@ -1,4 +1,4 @@
 *.pyc
 *.log
-src/multitask/data/
+multitask/data/
 *.DS_Store

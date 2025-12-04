@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [tool.poetry]
-packages = [{include = "multitask", from = "src"}]
+packages = [{include = "multitask", from = "./"}]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
