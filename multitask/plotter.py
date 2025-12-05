@@ -8,10 +8,14 @@ PLOT_LINESTYLES = [
     "-.",
     "--",
     ":",
+    "-",
+    "-.",
+    "--",
+    ":",
 ]
 
 
-def plot_loss_per_task(
+def plot_task_loss_same_plot(
     results: dict[str, list[dict[str, Any]]],
     targets: list[list[str]],
     axs: Any,
@@ -45,6 +49,61 @@ def plot_loss_per_task(
     axs[index].set_xlabel("Epoch")
     axs[index].set_ylabel("Loss")
     axs[index].legend()
+
+
+def plot_task_loss_separately(
+    results: dict[str, list[dict[str, Any]]],
+    targets: list[list[str]],
+    colors: list[str] = PLOT_COLOURS,
+) -> None:
+    num_rows = len(targets) // 2
+    fig, axs = plt.subplots(
+        num_rows,
+        2,
+        figsize=(12, num_rows * 4),
+    )
+
+    axs = axs.flatten() if num_rows > 1 else [axs]
+
+    for i, (model_name, result) in enumerate(results.items()):
+
+        epochs = [r["epoch"] for r in result]
+        train_losses = [r["train_loss"] for r in result]
+        val_losses = [r["val_loss"] for r in result]
+        for j, task in enumerate(targets):
+
+            task_train_losses = [tl[j] for tl in train_losses]
+            task_val_losses = [vl[j] for vl in val_losses]
+            if j == 0:
+                axs[j].plot(
+                    epochs,
+                    task_train_losses,
+                    label=f"{model_name}",
+                    color=colors[i],
+                    linestyle="-",
+                )
+            else:
+                axs[j].plot(
+                    epochs,
+                    task_train_losses,
+                    color=colors[i],
+                    linestyle="-",
+                )
+            axs[j].plot(
+                epochs,
+                task_val_losses,
+                linestyle="--",
+                color=colors[i],
+            )
+            axs[j].set_title(f"Loss for {task}")
+            axs[j].set_xlabel("Epoch")
+            axs[j].set_ylabel("Loss")
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.2)
+
+    fig.legend(loc="lower center")
+
+    fig.suptitle("Loss per Task")
 
 
 def plot_loss(

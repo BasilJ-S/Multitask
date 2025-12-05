@@ -52,6 +52,48 @@ class MultiTaskNaiveMLP(torch.nn.Module):
         return outputs
 
 
+class NaiveMultiTaskTimeseriesWrapper(torch.nn.Module):
+    """
+    Wrapper around a non-timeseries model to handle timeseries input by flattening context length and forecast length.
+    This assumes the underlying model follows the format of the other models in this file.
+    This has no special handling of the time dimension; it simply flattens it into the input and output dimensions.
+    """
+
+    def __init__(
+        self,
+        model_class: type,
+        input_size: int,
+        output_sizes: list[int],
+        context_length=1,
+        forecast_horizon=1,
+        **kwargs,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.output_sizes = output_sizes
+        self.model_class = model_class
+        self.context_length = context_length
+        self.forecast_horizon = forecast_horizon
+        self.kwargs = kwargs if kwargs is not None else {}
+
+        self.model = self.model_class(
+            input_size=self.input_size * self.context_length,
+            output_sizes=[
+                output_size * self.forecast_horizon for output_size in self.output_sizes
+            ],
+            **self.kwargs,
+        )
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x = x.view(x.size(0), -1)  # Flatten the input except for the batch dimension
+        outputs = self.model(x)
+        outputs = [
+            outputs.view(x.size(0), self.forecast_horizon, output_size)
+            for outputs, output_size in zip(outputs, self.output_sizes)
+        ]  # reshape outputs to list of (batch_size, forecast_horizon, output_size)
+        return outputs
+
+
 class MultiTaskHardShareMLP(torch.nn.Module):
     """Hard parameter sharing multi-task MLP. Has shared initial layers and task-specific output layers."""
 

@@ -90,11 +90,11 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
     def __getitem__(
         self, idx: int
     ) -> dict[str, torch.Tensor | dict[str, torch.Tensor]]:
-        y = {f"task_{i}": y_task[idx] for i, y_task in enumerate(self.y)}
+        y = {f"task_{i}": y_task[idx].unsqueeze(0) for i, y_task in enumerate(self.y)}
         batch = {
-            "X": self.X[idx],
+            "X": self.X[idx].unsqueeze(0),
             "y": y,
-        }
+        }  # Unsqueeze to add context length and forecast length dimensions of 1
         return batch
 
 

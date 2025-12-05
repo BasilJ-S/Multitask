@@ -7,10 +7,10 @@ import pandas as pd
 from datasets import Dataset as hfDataset
 
 """
-Note: This module requires access to the GridStatusIO API, and as is will pull ~300000 rows of data.
+Note: This module requires access to the GridStatusIO API, and as is will pull ~700000 rows of data.
 """
 
-START_DATE = dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)
+START_DATE = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
 END_DATE = dt.datetime(2025, 1, 1, 1, tzinfo=dt.timezone.utc)
 
 # Small set of ERCOT nodes for prediction, all in or near Austin
@@ -82,6 +82,12 @@ if __name__ == "__main__":
             "GridStatusIO API key not found in keyring or environment variables."
         )
     print(f"GridStatusIO API key retrieved successfully: {gs_key is not None}")
+    cont = input(
+        "Proceed to load data from GridStatusIO? This may take a while and use significant bandwidth. (y/n): "
+    )
+    if cont.lower() != "y":
+        print("Aborting data load.")
+        exit(0)
     length = 0
     for table_name, table_params in TABLES_TO_PULL.items():
         print(f"Loading data from table: {table_name}")
