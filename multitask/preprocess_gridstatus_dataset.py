@@ -12,8 +12,8 @@ from multitask.gridstatus_api import PREDICTION_NODES
 from multitask.logger import logger
 
 PATH = "multitask/data/"
-TRAIN_END_DATE = dt.datetime(2024, 4, 1, tzinfo=ZoneInfo("UTC"))
-VAL_END_DATE = dt.datetime(2024, 6, 1, tzinfo=ZoneInfo("UTC"))
+TRAIN_END_DATE = dt.datetime(2023, 1, 1, tzinfo=ZoneInfo("UTC"))
+VAL_END_DATE = dt.datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
 
 
 def path_to_file(filename: str) -> str:
