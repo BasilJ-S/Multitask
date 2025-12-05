@@ -328,6 +328,7 @@ if __name__ == "__main__":
             target_scalers,
             modelList,
         ) = preparer(device=device)
+        patience = 5
 
         loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
 
@@ -336,6 +337,8 @@ if __name__ == "__main__":
 
         results = {}
         for model in modelList:
+            epochs_no_improve = 0
+            best_val_loss = float("inf")
             results[get_model_name(model)] = []
             logger.info(
                 f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
@@ -364,6 +367,25 @@ if __name__ == "__main__":
                 results[get_model_name(model)].append(
                     {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
                 )
+                mean_val_loss = np.mean(val_loss)
+
+                if mean_val_loss < best_val_loss:
+                    best_val_loss = mean_val_loss
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    logger.info(
+                        f"No improvement in validation loss for {epochs_no_improve} epochs."
+                    )
+                if epochs_no_improve >= patience:
+                    logger.info(
+                        f"Early stopping triggered after {_epoch} epochs for model {get_model_name(model)}."
+                    )
+                    logger.info(
+                        f"Best validation loss: {best_val_loss} achieved. Epochs without improvement: {epochs_no_improve}."
+                    )
+                    break
+
                 message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
                 t.set_description(message)
                 t.write(message)
