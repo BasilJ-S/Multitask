@@ -11,7 +11,9 @@ import pandas as pd
 from multitask.gridstatus_api import PREDICTION_NODES
 from multitask.logger import logger
 
-PATH = "src/multitask/data/"
+PATH = "multitask/data/"
+TRAIN_END_DATE = dt.datetime(2024, 4, 1, tzinfo=ZoneInfo("UTC"))
+VAL_END_DATE = dt.datetime(2024, 6, 1, tzinfo=ZoneInfo("UTC"))
 
 
 def path_to_file(filename: str) -> str:
@@ -51,6 +53,23 @@ def index_by_datetime(df: pd.DataFrame) -> pd.DataFrame:
     df["interval_end_utc"] = pd.to_datetime(df["interval_end_utc"])
     df = df.set_index("interval_end_utc").sort_index()
     df = df.drop(columns=["interval_start_utc"])
+    return df
+
+
+def reindex_by_datetime(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    df = df.copy()
+    duplicates = df.index.duplicated(keep=False)
+    index_name = df.index.name
+    if duplicates.any():
+        logger.warning(
+            f"Found {duplicates.sum()} duplicate datetime indices. Averaging duplicates."
+        )
+        logger.warning(f"\n{df[duplicates]}")
+    min = df.index.min()
+    max = df.index.max()
+    full_index = pd.date_range(start=min, end=max, freq=freq, tz="UTC")
+    df = df.reindex(full_index)
+    df.index.name = index_name
     return df
 
 
@@ -129,10 +148,20 @@ def add_lags_to_actuals(
             logger.info(f"Adding lag of {lag} to column {col}")
             df[f"{col}_lag_{lag}"] = df[col].shift(freq=lag)
 
+    df.dropna(inplace=True)
     df = df.sort_index()
 
     logger.info(f"New data interval range: {df.index.max() - df.index.min()}")
 
+    return df
+
+
+def ffill(df: pd.DataFrame) -> pd.DataFrame:
+    """Forward fill missing values in the dataframe."""
+    df = df.copy()
+    logger.info(f"Missing values before ffill:\n{df.isna().sum()}")
+    df = df.ffill()
+    logger.info(f"Missing values after ffill:\n{df.isna().sum()}")
     return df
 
 
@@ -142,6 +171,15 @@ CONFIG = [
         transformations=[
             GridstatusTransformation(
                 function=index_by_datetime,
+            ),
+            GridstatusTransformation(
+                function=reindex_by_datetime,
+                parameters={
+                    "freq": "h",
+                },
+            ),
+            GridstatusTransformation(
+                function=ffill,
             ),
             GridstatusTransformation(
                 function=add_lags_to_actuals,
@@ -186,6 +224,15 @@ CONFIG = [
                 },
             ),
             GridstatusTransformation(
+                function=reindex_by_datetime,
+                parameters={
+                    "freq": "15min",
+                },
+            ),
+            GridstatusTransformation(
+                function=ffill,
+            ),
+            GridstatusTransformation(
                 function=downsample_to_hourly,
             ),
             GridstatusTransformation(
@@ -202,6 +249,15 @@ CONFIG = [
         transformations=[
             GridstatusTransformation(
                 function=index_by_datetime,
+            ),
+            GridstatusTransformation(
+                function=reindex_by_datetime,
+                parameters={
+                    "freq": "h",
+                },
+            ),
+            GridstatusTransformation(
+                function=ffill,
             ),
             GridstatusTransformation(
                 function=remove_columns,
@@ -231,17 +287,21 @@ def get_inference_and_prediction_intervals(start: dt.datetime, end: dt.datetime)
     while current <= end:
         # ---- Get Inference Time ----
         # 10:00 AM in CT on this date
-        ct_time = datetime.combine(current, time(10, 0), tzinfo=ct)
+        ct_time = datetime.combine(
+            current, time(10, 0), tzinfo=ZoneInfo("America/Chicago")
+        )
         # Convert to UTC
         utc_time = ct_time.astimezone(ZoneInfo("UTC"))
         inference_times.append(utc_time)
 
         # ---- Get Prediction Times ----
         current += delta
-        ct_time_next_day = datetime.combine(current, time(0), tzinfo=ct)
+        ct_time_next_day = datetime.combine(
+            current, time(0), tzinfo=ZoneInfo("America/Chicago")
+        )
         utc_time_next_day = ct_time_next_day.astimezone(ZoneInfo("UTC"))
         prediction_times.append(utc_time_next_day)
-        logger.info(
+        logger.debug(
             f"INFERENCE: {ct_time} 10:00 AM CT = {utc_time} UTC. PREDICTION DAY STARTS AT {ct_time_next_day} CT = {utc_time_next_day} UTC"
         )
 
@@ -254,12 +314,11 @@ def get_inference_and_prediction_intervals(start: dt.datetime, end: dt.datetime)
 
 
 if __name__ == "__main__":
-    # %%
     dfs = apply_all_transformations(CONFIG)
 
     overall_df = dfs[0]
     for df in dfs[1:]:
-        overall_df = overall_df.join(df, how="outer")
+        overall_df = overall_df.join(df, how="inner")
 
     overall_path = path_to_file("gridstatus_overall_transformed")
     overall_df.to_csv(overall_path)
@@ -267,13 +326,26 @@ if __name__ == "__main__":
 
     start, end = overall_df.index.min(), overall_df.index.max()
 
-    # Define your CT timezone
-    ct = ZoneInfo("America/Chicago")
+    logger.info(f"Dataset covers from {start} to {end}")
 
-    inf_times = get_inference_and_prediction_intervals(start, end)
-    inf_path = path_to_file("gridstatus_inference_prediction_intervals")
-    inf_times.to_csv(inf_path, index=False)
-    logger.info(f"Inference and prediction intervals saved to {inf_path}")
+    train_set = overall_df[overall_df.index < TRAIN_END_DATE]
+    val_set = overall_df[
+        (overall_df.index >= TRAIN_END_DATE) & (overall_df.index < VAL_END_DATE)
+    ]
+    test_set = overall_df[overall_df.index >= VAL_END_DATE]
 
+    for subset, name in [
+        (train_set, "train"),
+        (val_set, "validation"),
+        (test_set, "test"),
+    ]:
+        start, end = subset.index.min(), subset.index.max()
 
-# %%
+        inf_times = get_inference_and_prediction_intervals(start, end)
+
+        subset_path = path_to_file(f"gridstatus_{name}_set")
+        subset.to_csv(subset_path)
+        logger.info(f"{name.capitalize()} set saved to {subset_path}")
+        inf_times_path = path_to_file(f"gridstatus_{name}_inference_times")
+        inf_times.to_csv(inf_times_path, index=False)
+        logger.info(f"{name.capitalize()} inference times saved to {inf_times_path}")
