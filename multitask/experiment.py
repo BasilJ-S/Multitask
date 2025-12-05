@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 from datasets import Dataset as hfDataset
 from datasets import load_dataset
@@ -11,7 +12,11 @@ from models import (
     MultiTaskTTSoftShareMLP,
     NaiveMultiTaskTimeseriesWrapper,
 )
-from multi_datasets import PreScaledHFDataset
+from multi_datasets import (
+    PREDICTION_NODES,
+    PreScaledHFDataset,
+    PreScaledTimeseriesDataset,
+)
 from plotter import plot_loss, plot_loss_per_task
 from sklearn.preprocessing import StandardScaler
 from torch import optim
@@ -197,6 +202,110 @@ def prepare_housing_dataset(device=torch.device("cpu")):
     )
 
 
+def prepare_ercot_dataset(device=torch.device("cpu")):
+
+    train = pd.read_csv(
+        "multitask/data/gridstatus_train_set.csv",
+        index_col="interval_end_utc",
+    )
+    train_inference_times = pd.read_csv(
+        "multitask/data/gridstatus_train_inference_times.csv"
+    )
+    validation = pd.read_csv(
+        "multitask/data/gridstatus_validation_set.csv",
+        index_col="interval_end_utc",
+    )
+    validation_inference_times = pd.read_csv(
+        "multitask/data/gridstatus_validation_inference_times.csv"
+    )
+
+    target_cols = [[f"spp_{prediction_node}"] for prediction_node in PREDICTION_NODES]
+    all_targets = [t for sublist in target_cols for t in sublist]
+    features = [col for col in train.columns if col not in all_targets]
+    task_weights = [1.0 for _ in target_cols]  # Weight for each task equally
+
+    context_length = 24 * 2  # 2 days
+    forecast_horizon = 24  # 1 day
+
+    for i, target_group in enumerate(target_cols):
+        logger.info(
+            f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}"
+        )
+
+    # ---- CREATE PRE-SCALED DATASETS ----
+    train_dataset = PreScaledTimeseriesDataset(
+        timeseries=train,
+        inference_and_prediction_intervals=train_inference_times,
+        feature_cols=features,
+        target_cols=target_cols,
+        create_scalers=True,
+        context_window_hours=context_length,
+        prediction_horizon_hours=forecast_horizon,
+    )
+    feature_scaler = train_dataset.scaler_X
+    target_scalers = train_dataset.scaler_y
+    validation_dataset = PreScaledTimeseriesDataset(
+        timeseries=validation,
+        inference_and_prediction_intervals=validation_inference_times,
+        feature_cols=features,
+        target_cols=target_cols,
+        scaler_X=feature_scaler,
+        scaler_y=target_scalers,
+        context_window_hours=context_length,
+        prediction_horizon_hours=forecast_horizon,
+    )
+    input_size = len(features)
+    output_sizes = [len(t) for t in target_cols]
+
+    # use MultiTaskMLP for two targets (MedHouseVal and AveRooms)
+    modelList = [
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskResidualNetwork,
+            input_size=input_size,
+            task_hidden_sizes=[16, 16],
+            shared_hidden_sizes=[16, 16],
+            output_sizes=output_sizes,
+            context_length=context_length,
+            forecast_horizon=forecast_horizon,
+        ).to(device),
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskTTSoftShareMLP,
+            input_size=input_size,
+            hidden_sizes=[16, 16, 16],
+            output_sizes=output_sizes,
+            tt_rank=4,
+            context_length=context_length,
+            forecast_horizon=forecast_horizon,
+        ).to(device),
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskNaiveMLP,
+            input_size=input_size,
+            output_sizes=output_sizes,
+            hidden_sizes=[16, 16, 16],
+            context_length=context_length,
+            forecast_horizon=forecast_horizon,
+        ).to(device),
+        NaiveMultiTaskTimeseriesWrapper(
+            model_class=MultiTaskHardShareMLP,
+            input_size=input_size,
+            shared_hidden_sizes=[18, 18, 18],
+            task_hidden_sizes=[],
+            output_sizes=output_sizes,
+            context_length=context_length,
+            forecast_horizon=forecast_horizon,
+        ).to(device),
+    ]
+    return (
+        train_dataset,
+        validation_dataset,
+        features,
+        target_cols,
+        task_weights,
+        target_scalers,
+        modelList,
+    )
+
+
 def get_model_name(model: torch.nn.Module) -> str:
     if isinstance(model, NaiveMultiTaskTimeseriesWrapper):
         return f"NaiveMultiTaskTimeseriesWrapper({model.model.__class__.__name__})"
@@ -206,87 +315,92 @@ def get_model_name(model: torch.nn.Module) -> str:
 if __name__ == "__main__":
     # ---- LOAD DATASET ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    (
-        train_dataset,
-        validation_dataset,
-        features,
-        targets,
-        task_weights,
-        target_scalers,
-        modelList,
-    ) = prepare_housing_dataset(device=device)
+    for preparer in [
+        prepare_ercot_dataset,
+        prepare_housing_dataset,
+    ]:
+        logger.info(f"Preparing dataset using {preparer.__name__}")
+        (
+            train_dataset,
+            validation_dataset,
+            features,
+            targets,
+            task_weights,
+            target_scalers,
+            modelList,
+        ) = preparer(device=device)
 
-    loss = torch.nn.MSELoss(reduction="mean")
+        loss = torch.nn.MSELoss(reduction="mean")
 
-    train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-    validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+        train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+        validation_dataloader = DataLoader(validation_dataset, batch_size=128)
 
-    results = {}
-    for model in modelList:
-        results[get_model_name(model)] = []
-        logger.info(
-            f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
+        results = {}
+        for model in modelList:
+            results[get_model_name(model)] = []
+            logger.info(
+                f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
+            )
+            optimizer = optim.Adam(params=model.parameters(), lr=0.001)
+            t = trange(25, unit="epoch")
+            for _epoch in t:
+                train_loss = run_epoch(
+                    train_dataloader,
+                    model,
+                    loss,
+                    task_weights=task_weights,
+                    optimizer=optimizer,
+                    device=device,
+                )
+
+                val_loss = run_epoch(
+                    validation_dataloader,
+                    model,
+                    loss,
+                    task_weights=task_weights,
+                    optimizer=None,
+                    device=device,
+                )
+
+                results[get_model_name(model)].append(
+                    {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
+                )
+                message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
+                t.set_description(message)
+                t.write(message)
+
+        # Validate on unscaled data for interpretability
+        val_loss_unscaled = run_epoch(
+            validation_dataloader,
+            model,
+            loss,
+            task_weights=task_weights,
+            optimizer=None,
+            device=device,
+            reverse_task_scalers=target_scalers,
         )
-        optimizer = optim.Adam(params=model.parameters(), lr=0.001)
-        t = trange(10, unit="epoch")
-        for _epoch in t:
-            train_loss = run_epoch(
-                train_dataloader,
-                model,
-                loss,
-                task_weights=task_weights,
-                optimizer=optimizer,
-                device=device,
-            )
+        logger.info(
+            f"Final unscaled validation MSE for model {get_model_name(model)}: {val_loss_unscaled}"
+        )
 
-            val_loss = run_epoch(
-                validation_dataloader,
-                model,
-                loss,
-                task_weights=task_weights,
-                optimizer=None,
-                device=device,
-            )
+        # ---- PLOT RESULTS ----
+        fig, axs = plt.subplots(1, 2, figsize=(28, 12))
 
-            results[get_model_name(model)].append(
-                {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
-            )
-            message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
-            t.set_description(message)
-            t.write(message)
+        plot_loss_per_task(results, targets, axs, 0)
+        plot_loss(results, axs, 1)
 
-    # Validate on unscaled data for interpretability
-    val_loss_unscaled = run_epoch(
-        validation_dataloader,
-        model,
-        loss,
-        task_weights=task_weights,
-        optimizer=None,
-        device=device,
-        reverse_task_scalers=target_scalers,
-    )
-    logger.info(
-        f"Final unscaled validation MSE for model {get_model_name(model)}: {val_loss_unscaled}"
-    )
+        # Add labels describing each task for whole figure
+        fig.suptitle(
+            "Multi-Task MLP Model Comparison on California Housing Dataset", fontsize=16
+        )
+        task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
+        fig.text(
+            0.5,
+            0.04,
+            ", ".join(task_text),
+            ha="center",
+            fontsize=10,
+        )
 
-    # ---- PLOT RESULTS ----
-    fig, axs = plt.subplots(1, 2, figsize=(28, 12))
-
-    plot_loss_per_task(results, targets, axs, 0)
-    plot_loss(results, axs, 1)
-
-    # Add labels describing each task for whole figure
-    fig.suptitle(
-        "Multi-Task MLP Model Comparison on California Housing Dataset", fontsize=16
-    )
-    task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
-    fig.text(
-        0.5,
-        0.04,
-        ", ".join(task_text),
-        ha="center",
-        fontsize=10,
-    )
-
-    plt.savefig("multitask_mlp_comparison.png")
-    plt.show()
+        plt.savefig("multitask_mlp_comparison.png")
+        plt.show()
