@@ -123,26 +123,12 @@ if __name__ == "__main__":
             f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}"
         )
 
-    # Fit scalers on training data
-    target_scalers = [StandardScaler() for _ in targets]
-    feature_scaler = StandardScaler()
-    train_features = np.stack([hf_train[col] for col in features], axis=1)
-    train_targets = [
-        np.stack([hf_train[col] for col in target_group], axis=1)
-        for target_group in targets
-    ]
-    feature_scaler.fit(train_features)
-    logger.info(f"Feature means: {feature_scaler.mean_}, stds: {feature_scaler.scale_}")
-    for i, (scaler, target_set) in enumerate(zip(target_scalers, train_targets)):
-        scaler.fit(target_set)
-        logger.info(
-            f" Target means for Task {i}: {scaler.mean_}, stds: {scaler.scale_}"
-        )
-
     # ---- CREATE PRE-SCALED DATASETS ----
     train_dataset = PreScaledHFDataset(
-        hf_train, features, targets, scaler_X=feature_scaler, scaler_y=target_scalers
+        hf_train, features, targets, scaler_X=None, scaler_y=None, create_scalers=True
     )
+    feature_scaler = train_dataset.scaler_X
+    target_scalers = train_dataset.scaler_y
     validation_dataset = PreScaledHFDataset(
         hf_validation,
         features,

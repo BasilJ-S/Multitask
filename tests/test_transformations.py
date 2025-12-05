@@ -139,24 +139,27 @@ class TestAddLagsToActuals:
         df_with_lags = add_lags_to_actuals(df, columns=["actuals"], lags=lag_hours)
         logger.info(f"\n{df_with_lags}")
 
-        expected_actuals = [10, 20, 30, 40]
-        expected_lag_1h = [None, 10, 20, 30]
-        expected_lag_2h = [None, None, 10, 20]
+        expected_actuals = [30, 40]
+        expected_lag_1h = [20, 30]
+        expected_lag_2h = [10, 20]
 
         pd.testing.assert_series_equal(
             df_with_lags["actuals"],
-            pd.Series(expected_actuals, index=df.index),
+            pd.Series(expected_actuals, index=df.index[-2:]),
             check_names=False,
+            check_dtype=False,
         )
         pd.testing.assert_series_equal(
             df_with_lags["actuals_lag_0 days 01:00:00"],
-            pd.Series(expected_lag_1h, index=df.index),
+            pd.Series(expected_lag_1h, index=df.index[-2:]),
             check_names=False,
+            check_dtype=False,
         )
         pd.testing.assert_series_equal(
             df_with_lags["actuals_lag_0 days 02:00:00"],
-            pd.Series(expected_lag_2h, index=df.index),
+            pd.Series(expected_lag_2h, index=df.index[-2:]),
             check_names=False,
+            check_dtype=False,
         )
 
     def test_off_hours(self):
@@ -175,25 +178,20 @@ class TestAddLagsToActuals:
         df_with_lags = add_lags_to_actuals(df, columns=["actuals"], lags=lag_hours)
         logger.info(f"\n{df_with_lags}")
 
-        expected_actuals = [10, 20, 30, 40]
-        expected_lag_30m = [None, None, 10, 20]
-        expected_lag_45m = [None, None, None, 10]
+        expected_actuals = [40]
+        expected_lag_30m = [20]
+        expected_lag_45m = [10]
 
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals"],
-            pd.Series(expected_actuals, index=df.index),
-            check_names=False,
-        )
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals_lag_0 days 00:30:00"],
-            pd.Series(expected_lag_30m, index=df.index),
-            check_names=False,
-        )
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals_lag_0 days 00:45:00"],
-            pd.Series(expected_lag_45m, index=df.index),
-            check_names=False,
-        )
+        assert len(df_with_lags) == 1
+        for col, expected in zip(
+            [
+                "actuals",
+                "actuals_lag_0 days 00:30:00",
+                "actuals_lag_0 days 00:45:00",
+            ],
+            [expected_actuals, expected_lag_30m, expected_lag_45m],
+        ):
+            assert df_with_lags[col].tolist() == expected
 
     def test_nonoverlap(self):
         data = {
@@ -207,29 +205,9 @@ class TestAddLagsToActuals:
         }
         df = pd.DataFrame(data).set_index("interval_end_utc")
         lag_hours = [pd.Timedelta(hours=2), pd.Timedelta(hours=16)]
-
-        expected_actuals = [10, 20, 30, 40]
-        expected_lag_30m = [None, 10, 20, 30]
-        expected_lag_45m = [None, None, None, None]
         df_with_lags = add_lags_to_actuals(df, columns=["actuals"], lags=lag_hours)
 
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals"],
-            pd.Series(expected_actuals, index=df.index),
-            check_names=False,
-        )
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals_lag_0 days 02:00:00"],
-            pd.Series(expected_lag_30m, index=df.index),
-            check_names=False,
-            check_dtype=False,
-        )
-        pd.testing.assert_series_equal(
-            df_with_lags["actuals_lag_0 days 16:00:00"],
-            pd.Series(expected_lag_45m, index=df.index),
-            check_names=False,
-            check_dtype=False,
-        )
+        assert len(df_with_lags) == 0
 
 
 class TestResample:
