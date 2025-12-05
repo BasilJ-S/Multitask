@@ -17,7 +17,7 @@ from multi_datasets import (
     PreScaledHFDataset,
     PreScaledTimeseriesDataset,
 )
-from plotter import plot_loss, plot_loss_per_task
+from plotter import plot_loss, plot_task_loss_same_plot, plot_task_loss_separately
 from sklearn.preprocessing import StandardScaler
 from torch import optim
 from torch.utils.data import DataLoader
@@ -328,6 +328,7 @@ if __name__ == "__main__":
             target_scalers,
             modelList,
         ) = preparer(device=device)
+
         patience = 5
 
         loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
@@ -405,9 +406,10 @@ if __name__ == "__main__":
         )
 
         # ---- PLOT RESULTS ----
+        plot_task_loss_separately(results, targets)
         fig, axs = plt.subplots(1, 2, figsize=(28, 12))
 
-        plot_loss_per_task(results, targets, axs, 0)
+        plot_task_loss_same_plot(results, targets, axs, 0)
         plot_loss(results, axs, 1)
 
         # Add labels describing each task for whole figure
