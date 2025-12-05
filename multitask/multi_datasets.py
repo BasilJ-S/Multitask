@@ -21,7 +21,7 @@ def assert_contiguous_indices(df: pd.DataFrame):
     )
     expected_index = pd.date_range(start=df.index.min(), end=df.index.max(), freq="h")
     if not df.index.equals(expected_index):
-        missing_indices = expected_index.difference(df.index)
+        missing_indices = expected_index.difference(df.index)  # type: ignore
         raise AssertionError(
             f"DataFrame index is not contiguous. Missing {len(missing_indices)} indices: {missing_indices}"
         )
@@ -78,11 +78,11 @@ class PreScaledHFDataset(torch.utils.data.Dataset):
             X = scaler_X.transform(X)
 
         # Store as tensors directly
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]
+        self.X = torch.tensor(X, dtype=torch.float32)  # type: ignore
+        self.y = [torch.tensor(y_task, dtype=torch.float32) for y_task in y_overall]  # type: ignore
 
-        self.scaler_X = created_scaler_x if create_scalers else scaler_X
-        self.scaler_y = y_created_scalers if create_scalers else scaler_y
+        self.scaler_X = created_scaler_x if create_scalers else scaler_X  # type: ignore
+        self.scaler_y = y_created_scalers if create_scalers else scaler_y  # type: ignore
 
     def __len__(self) -> int:
         return len(self.y[0])
@@ -211,7 +211,7 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
 
         new_intervals = new_intervals[
             new_intervals["prediction_day_start_utc"]
-            + self.prediction_horizon_hours * dt.timedelta(hours=1)
+            + self.prediction_horizon_hours * dt.timedelta(hours=1)  # type: ignore
             <= self.max_date
         ]
         new_intervals = new_intervals.reset_index(drop=True)
@@ -233,14 +233,14 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
 
         if (
             inference_date - self.context_window_hours * dt.timedelta(hours=1)
-            < self.min_date
+            < self.min_date  # type: ignore
         ):
             raise ValueError(
                 f"Not enough context data for inference date {inference_date}."
             )
         if (
             prediction_date + self.prediction_horizon_hours * dt.timedelta(hours=1)
-            > self.max_date
+            > self.max_date  # type: ignore
         ):
             raise ValueError(
                 f"Not enough prediction data for prediction date {prediction_date}."
@@ -258,8 +258,8 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         prediction_date = self.inference_and_prediction_intervals.loc[
             idx, "prediction_day_start_utc"
         ]
-        inference_idx = self.timeseries_date_to_index[inference_date]
-        prediction_idx = self.timeseries_date_to_index[prediction_date]
+        inference_idx = self.timeseries_date_to_index[inference_date]  # type: ignore
+        prediction_idx = self.timeseries_date_to_index[prediction_date]  # type: ignore
         logger.debug(
             f"Inference date: {inference_date}, index: {inference_idx}\nPrediction date: {prediction_date}, index: {prediction_idx}"
         )
@@ -319,7 +319,7 @@ if __name__ == "__main__":
         feature_cols=[
             col for col in hf_train.column_names if col not in ["MedHouseVal"]
         ],
-        target_cols=[["MedHouseVal"], ["AveRooms"]],
+        target_cols=[["MedHouseVal"], ["AveRooms"]],  # type: ignore
         create_scalers=True,
     )
     logger.info(
