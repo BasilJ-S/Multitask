@@ -53,7 +53,7 @@ def run_epoch(
         model.eval()
 
     total_loss = [0.0 for _ in task_weights]
-    total_samples = 0
+    total_elements = [0 for _ in task_weights]
 
     for batch in dataloader:
         X = batch[
@@ -107,26 +107,25 @@ def run_epoch(
                 y[task] = task_y_unscaled
 
         # compute per-task MSE (using the loss defined above) and sum them
-        l_per_task = torch.stack(
-            [
-                loss_fn(pred, y_i.float().to(device)) * task_weight
-                for pred, y_i, task_weight in zip(predictions, y, task_weights)
-            ]
-        )
+        l_per_task = [
+            loss_fn(pred, y_i.float().to(device)) for pred, y_i in zip(predictions, y)
+        ]
 
-        l = l_per_task.sum()
+        batch_elements = [l_i.numel() for l_i in l_per_task]
+
+        # sum loss per task
+        for task_idx, l_i in enumerate(l_per_task):
+            total_loss[task_idx] += l_i.sum().item()
+            total_elements[task_idx] += batch_elements[task_idx]
 
         if is_training:
-            l.backward()
+            # backprop on the sum of mean losses
+            batch_loss = torch.sum(torch.stack([l_i.mean() for l_i in l_per_task]))
+            batch_loss.backward()
             optimizer.step()
 
-        total_loss = [
-            tl + l_i.item() * y[0].size(0) for tl, l_i in zip(total_loss, l_per_task)
-        ]
-        total_samples += y[0].size(0)
-
-    avg_loss = [tl / total_samples for tl in total_loss]
-    return avg_loss
+    mean_task_losses = [tl / te for tl, te in zip(total_loss, total_elements)]
+    return mean_task_losses
 
 
 def prepare_housing_dataset(device=torch.device("cpu")):
@@ -330,7 +329,7 @@ if __name__ == "__main__":
             modelList,
         ) = preparer(device=device)
 
-        loss = torch.nn.MSELoss(reduction="mean")
+        loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
 
         train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
         validation_dataloader = DataLoader(validation_dataset, batch_size=128)
@@ -391,7 +390,7 @@ if __name__ == "__main__":
 
         # Add labels describing each task for whole figure
         fig.suptitle(
-            "Multi-Task MLP Model Comparison on California Housing Dataset", fontsize=16
+            f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16
         )
         task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
         fig.text(
