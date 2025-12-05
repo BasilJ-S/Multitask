@@ -9,10 +9,6 @@ from gridstatus_api import PREDICTION_NODES
 from logger import logger
 from sklearn.preprocessing import StandardScaler
 
-VALID_START_DATE = dt.datetime(
-    2023, 1, 2, 1, 0, 0, tzinfo=dt.timezone.utc
-)  # First date with full data
-
 
 def assert_contiguous_indices(df: pd.DataFrame):
     """
@@ -121,6 +117,7 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         prediction_horizon_hours: int = 24,
     ):
 
+        # Initialize basic parameters
         self.feature_cols = feature_cols
         self.target_cols = target_cols
         self.context_window_hours = context_window_hours
@@ -128,10 +125,26 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         logger.info(
             f"Target columns: {self.target_cols}, feature columns: {self.feature_cols}"
         )
+
+        # Convert to pandas datetime if not already
+        timeseries = timeseries.copy()
+        timeseries.index = pd.to_datetime(timeseries.index, utc=True)
         self.min_date = timeseries.index.min()
         self.max_date = timeseries.index.max()
+        logger.info(f"Timeseries date range from {self.min_date} to {self.max_date}")
 
-        self.inference_and_prediction_intervals = inference_and_prediction_intervals
+        inference_and_prediction_intervals = inference_and_prediction_intervals.copy()
+        inference_and_prediction_intervals["inference_time_utc"] = pd.to_datetime(
+            inference_and_prediction_intervals["inference_time_utc"], utc=True
+        )
+        inference_and_prediction_intervals["prediction_day_start_utc"] = pd.to_datetime(
+            inference_and_prediction_intervals["prediction_day_start_utc"], utc=True
+        )
+        self.inference_and_prediction_intervals = self.select_valid_inference_times(
+            inference_and_prediction_intervals
+        )  # Filter to inference times with sufficient context and prediction data
+
+        # Validate inputs
         assert (
             timeseries.index.is_monotonic_increasing
         ), "Timeseries index must be sorted."
@@ -142,7 +155,9 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
             raise ValueError(
                 "Cannot create scalers and use provided scalers at the same time."
             )
+        assert_contiguous_indices(timeseries)
 
+        # Map datetime to index for quick lookup
         self.timeseries_date_to_index = {
             date: idx for idx, date in enumerate(timeseries.index)
         }
@@ -155,7 +170,7 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         logger.info(f"Feature shape: {X.shape}")
         logger.info(f"Target shapes: {[y.shape for y in ys]}")
 
-        # Per task
+        # Per task scaling
         y_overall = []
         y_created_scalers = []
         for i, task_targets in enumerate(self.target_cols):
@@ -184,6 +199,26 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         self.scaler_X = created_scaler_x if create_scalers else scaler_X
         self.scaler_y = y_created_scalers if create_scalers else scaler_y
         self.validate_indices()
+
+    def select_valid_inference_times(
+        self, inference_times: pd.DataFrame
+    ) -> pd.DataFrame:
+        inference_times = inference_times.copy()
+        new_intervals = inference_times[
+            inference_times["inference_time_utc"]
+            >= self.min_date + self.context_window_hours * dt.timedelta(hours=1)
+        ]
+
+        new_intervals = new_intervals[
+            new_intervals["prediction_day_start_utc"]
+            + self.prediction_horizon_hours * dt.timedelta(hours=1)
+            <= self.max_date
+        ]
+        new_intervals = new_intervals.reset_index(drop=True)
+        logger.info(
+            f"Filtered inference intervals from {len(inference_times)} to {len(new_intervals)} based on available context and prediction data."
+        )
+        return new_intervals
 
     def validate_indices(self):
         for idx, row in self.inference_and_prediction_intervals.iterrows():
@@ -243,49 +278,14 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         return batch
 
 
-def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean the gridstatus dataframe by removing duplicates and sorting by index."""
-    df = df.copy()
-    df = df[~df.index.duplicated(keep="first")]
-    df = df[VALID_START_DATE:]
-    df = df.sort_index()
-    assert_contiguous_indices(df)
-    df.ffill(inplace=True)
-    assert_contiguous_indices(df)
-    return df
-
-
-def clean_inference_predictions(df: pd.DataFrame) -> pd.DataFrame:
-    """Clean the gridstatus dataframe by removing duplicates and sorting by index."""
-    logger.info(df.index)
-    df["inference_time_utc"] = pd.to_datetime(df["inference_time_utc"])
-    df["prediction_day_start_utc"] = pd.to_datetime(df["prediction_day_start_utc"])
-    df = df[
-        df["inference_time_utc"] >= VALID_START_DATE + dt.timedelta(days=8)
-    ]  # Ensure we have a week of data for lags
-    return df.reset_index()
-
-
 if __name__ == "__main__":
     # Read in dataframe and set index to datetime
     dataframe = pd.read_csv(
-        "src/multitask/data/gridstatus_overall_transformed.csv",
+        "multitask/data/gridstatus_train_set.csv",
         index_col="interval_end_utc",
     )
-    dataframe.index = pd.to_datetime(dataframe.index)
     inference_prediction_intervals = pd.read_csv(
-        "src/multitask/data/gridstatus_inference_prediction_intervals.csv",
-    )
-
-    dataframe = clean_data(dataframe)
-    inference_prediction_intervals = clean_inference_predictions(
-        inference_prediction_intervals
-    )
-    logger.info(
-        f"Index range on dataframe: {dataframe.index.min()} to {dataframe.index.max()}"
-    )
-    logger.info(
-        f"Index range on inference_prediction_intervals: {inference_prediction_intervals.index.min()} to {inference_prediction_intervals.index.max()}"
+        "multitask/data/gridstatus_train_inference_times.csv",
     )
 
     target_cols = [[f"spp_{prediction_node}"] for prediction_node in PREDICTION_NODES]
