@@ -270,9 +270,16 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
             ]
             for i, y_task in enumerate(self.y)
         }
+        before_inf = self.context_window_hours - self.prediction_horizon_hours
+        if before_inf < 0:
+            raise ValueError("Prediction horizon cannot be longer than context window.")
 
         batch = {
-            "X": self.X[inference_idx - self.context_window_hours : inference_idx],
+            "X": self.X[
+                prediction_idx
+                - before_inf : prediction_idx
+                + self.prediction_horizon_hours
+            ],
             "y": y,
         }
         return batch
