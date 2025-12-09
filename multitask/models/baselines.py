@@ -101,29 +101,23 @@ class LinearPredictor(BaselineModel):
 
             B_val, _, _ = X_eval.shape
 
-            # Solve linear model for each forecast step separately
-            w_list = []
-            train_pred_task = []
-            val_pred_task = []
+            y_t = y_train_task.reshape(B, -1)  # flatten (B, T_f*D_out)
+            X_flat = X_train_task.reshape(B, -1)  # flatten context: (B, T_c*D_in)
+            X_b = torch.cat([X_flat, torch.ones(B, 1)], dim=1)  # (B, T_c*D_in+1)
 
-            for t in range(T_f):
-                y_t = y_train_task[:, t, :]  # (B, D_out)
-                X_flat = X_train_task.reshape(B, -1)  # flatten context: (B, T_c*D_in)
-                X_b = torch.cat([X_flat, torch.ones(B, 1)], dim=1)  # (B, T_c*D_in+1)
+            # Least squares
+            w = torch.linalg.lstsq(X_b, y_t).solution  # (T_c*D_in+1, D_out)
 
-                # Least squares
-                w = torch.linalg.lstsq(X_b, y_t).solution  # (T_c*D_in+1, D_out)
-                w_list.append(w)
+            # Predictions
+            pred_train = (X_b @ w).reshape(B, T_f, D_out)
 
-                # Predictions
-                train_pred_task.append((X_b @ w).unsqueeze(1))  # (B,1,D_out)
-                X_val_flat = X_eval.reshape(B_val, -1)
-                X_val_b = torch.cat([X_val_flat, torch.ones(B_val, 1)], dim=1)
-                val_pred_task.append((X_val_b @ w).unsqueeze(1))
+            X_val_flat = X_eval.reshape(B_val, -1)
+            X_val_b = torch.cat([X_val_flat, torch.ones(B_val, 1)], dim=1)
+            pred_val = (X_val_b @ w).reshape(B_val, T_f, D_out)
 
             # Concatenate across forecast horizon
-            train_pred.append(torch.cat(train_pred_task, dim=1))  # (B, T_f, D_out)
-            val_pred.append(torch.cat(val_pred_task, dim=1))
+            train_pred.append(pred_train)  # (B, T_f, D_out)
+            val_pred.append(pred_val)  # (B, T_f, D_out)
 
         return train_pred, val_pred
 
