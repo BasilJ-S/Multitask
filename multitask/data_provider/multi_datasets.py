@@ -5,9 +5,10 @@ import pandas as pd
 import torch
 from datasets import Dataset as hfDataset
 from datasets import load_dataset
-from gridstatus_api import PREDICTION_NODES
-from logger import logger
 from sklearn.preprocessing import StandardScaler
+
+from multitask.data.gridstatus_api import PREDICTION_NODES
+from multitask.utils.logger import logger
 
 
 def assert_contiguous_indices(df: pd.DataFrame):

@@ -1,4 +1,4 @@
 *.pyc
 *.log
-multitask/data/
+multitask/data_store/
 *.DS_Store

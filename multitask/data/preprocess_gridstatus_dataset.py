@@ -2,25 +2,21 @@
 import datetime as dt
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
-from os import path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from multitask.gridstatus_api import PREDICTION_NODES
-from multitask.logger import logger
+from multitask.data.gridstatus_api import PREDICTION_NODES
+from multitask.utils.logger import logger
+from multitask.utils.utils import path_to_file
 
-PATH = "multitask/data/"
+PATH = "multitask/data_store/"
 ERCOT_TRAIN_END_DATE = dt.datetime(2023, 1, 1, tzinfo=ZoneInfo("UTC"))
 ERCOT_VAL_END_DATE = dt.datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
 
 WEATHER_TRAIN_END_DATE = dt.datetime(2014, 1, 1, tzinfo=ZoneInfo("UTC"))
 WEATHER_VAL_END_DATE = dt.datetime(2015, 1, 1, tzinfo=ZoneInfo("UTC"))
-
-
-def path_to_file(filename: str) -> str:
-    return path.join(PATH, filename + ".csv")
 
 
 ACTUALS_STANDARD = [
