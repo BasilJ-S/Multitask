@@ -115,6 +115,7 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         create_scalers: bool = False,
         context_window_hours: int = 7 * 24,
         prediction_horizon_hours: int = 24,
+        are_features_available_through_prediction_time: bool = True,
     ):
 
         # Initialize basic parameters
@@ -122,6 +123,9 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
         self.target_cols = target_cols
         self.context_window_hours = context_window_hours
         self.prediction_horizon_hours = prediction_horizon_hours
+        self.are_features_available_through_prediction_time = (
+            are_features_available_through_prediction_time
+        )
         logger.info(
             f"Target columns: {self.target_cols}, feature columns: {self.feature_cols}"
         )
@@ -270,16 +274,22 @@ class PreScaledTimeseriesDataset(torch.utils.data.Dataset):
             ]
             for i, y_task in enumerate(self.y)
         }
-        before_inf = self.context_window_hours - self.prediction_horizon_hours
-        if before_inf < 0:
-            raise ValueError("Prediction horizon cannot be longer than context window.")
+
+        if not self.are_features_available_through_prediction_time:
+            before_inf = self.context_window_hours - self.prediction_horizon_hours
+            if before_inf < 0:
+                raise ValueError(
+                    "Prediction horizon cannot be longer than context window."
+                )
+            x_start, x_end = (
+                prediction_idx - before_inf,
+                prediction_idx + self.prediction_horizon_hours,
+            )
+        else:
+            x_start, x_end = inference_idx - self.context_window_hours, inference_idx
 
         batch = {
-            "X": self.X[
-                prediction_idx
-                - before_inf : prediction_idx
-                + self.prediction_horizon_hours
-            ],
+            "X": self.X[x_start:x_end],
             "y": y,
         }
         return batch
