@@ -13,6 +13,7 @@ PLOT_LINESTYLES = [
     "--",
     ":",
 ]
+BASELINE_COLOURS = ["gray", "black"]
 
 
 def plot_task_loss_same_plot(
@@ -62,8 +63,36 @@ def plot_task_loss_separately(
         2,
         figsize=(12, num_rows * 4),
     )
+    axs = axs.flatten() if num_rows > 1 else axs
 
-    axs = axs.flatten() if num_rows > 1 else [axs]
+    for baseline_name, baseline_results, baseline_color in [
+        ("Global Mean", results.pop("global_mean", None), "gray"),
+        ("Linear", results.pop("linear", None), "black"),
+        ("XGBoost", results.pop("xgboost", None), "purple"),
+    ]:
+        if baseline_results is not None:
+            # add horizontal lines for baseline
+            for j, task in enumerate(targets):
+                task_train_loss = baseline_results["train_loss"][j]
+                task_val_loss = baseline_results["val_loss"][j]
+                if j == 0:
+                    axs[j].axhline(
+                        y=task_train_loss,
+                        label=f"{baseline_name} Baseline",
+                        color=baseline_color,
+                        linestyle="-",
+                    )
+                else:
+                    axs[j].axhline(
+                        y=task_train_loss,
+                        color=baseline_color,
+                        linestyle="-",
+                    )
+                axs[j].axhline(
+                    y=task_val_loss,
+                    color=baseline_color,
+                    linestyle="--",
+                )
 
     for i, (model_name, result) in enumerate(results.items()):
 
