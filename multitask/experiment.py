@@ -1,3 +1,5 @@
+from typing import Callable
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -21,8 +23,10 @@ from multi_datasets import (
 from plotter import plot_loss, plot_task_loss_same_plot, plot_task_loss_separately
 from sklearn.preprocessing import StandardScaler
 from torch import optim
+from torch.distributions.independent import D
 from torch.utils.data import DataLoader
 from tqdm.auto import trange
+from xgboost import data
 
 
 def run_epoch(
@@ -198,8 +202,54 @@ def prepare_housing_dataset(device=torch.device("cpu")):
     )
 
 
-def prepare_ercot_dataset(device=torch.device("cpu")):
+def prepare_weather_data():
+    train = pd.read_csv("multitask/data/weather_train_set.csv", index_col="Date Time")
+    train_inference_times = pd.read_csv(
+        "multitask/data/weather_train_inference_times.csv"
+    )
+    validation = pd.read_csv(
+        "multitask/data/weather_validation_set.csv",
+        index_col="Date Time",
+    )
+    validation_inference_times = pd.read_csv(
+        "multitask/data/weather_validation_inference_times.csv"
+    )
 
+    target_cols = [
+        ["T (degC)", "Tpot (K)", "Tdew (degC)"],
+        ["rh (%)", "sh (g/kg)", "H2OC (mmol/mol)"],
+        ["p (mbar)", "VPmax (mbar)", "VPact (mbar)", "VPdef (mbar)"],
+        ["rho (g/m**3)", "wv (m/s)", "max. wv (m/s)", "wd (deg)"],
+    ]
+
+    are_features_available_through_prediction_time = False
+
+    # Forecasting all targets together
+    features = [col for col in train.columns]
+    logger.info(f"All features ({len(features)}): {features}")
+    task_weights = [1.0 for _ in target_cols]  # Weight for each task equally
+
+    context_length = 24 * 2  # 2 days
+    forecast_horizon = 24  # 1 day
+    for i, target_group in enumerate(target_cols):
+        logger.info(
+            f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}"
+        )
+    return (
+        train,
+        train_inference_times,
+        validation,
+        validation_inference_times,
+        features,
+        target_cols,
+        task_weights,
+        context_length,
+        forecast_horizon,
+        are_features_available_through_prediction_time,
+    )
+
+
+def prepare_ercot_data():
     train = pd.read_csv(
         "multitask/data/gridstatus_train_set.csv",
         index_col="interval_end_utc",
@@ -220,6 +270,8 @@ def prepare_ercot_dataset(device=torch.device("cpu")):
     features = [col for col in train.columns if col not in all_targets]
     task_weights = [1.0 for _ in target_cols]  # Weight for each task equally
 
+    are_features_available_through_prediction_time = True
+
     context_length = 24 * 2  # 2 days
     forecast_horizon = 24  # 1 day
 
@@ -227,6 +279,42 @@ def prepare_ercot_dataset(device=torch.device("cpu")):
         logger.info(
             f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}"
         )
+    return (
+        train,
+        train_inference_times,
+        validation,
+        validation_inference_times,
+        features,
+        target_cols,
+        task_weights,
+        context_length,
+        forecast_horizon,
+        are_features_available_through_prediction_time,
+    )
+
+
+def prepare_ercot_full(device=torch.device("cpu")):
+    return prepare_timeseries_dataset(prepare_ercot_data, device=device)
+
+
+def prepare_weather_full(device=torch.device("cpu")):
+    return prepare_timeseries_dataset(prepare_weather_data, device=device)
+
+
+def prepare_timeseries_dataset(data_preparer: Callable, device=torch.device("cpu")):
+
+    (
+        train,
+        train_inference_times,
+        validation,
+        validation_inference_times,
+        features,
+        target_cols,
+        task_weights,
+        context_length,
+        forecast_horizon,
+        are_features_available_through_prediction_time,
+    ) = data_preparer()
 
     # ---- CREATE PRE-SCALED DATASETS ----
     train_dataset = PreScaledTimeseriesDataset(
@@ -237,6 +325,7 @@ def prepare_ercot_dataset(device=torch.device("cpu")):
         create_scalers=True,
         context_window_hours=context_length,
         prediction_horizon_hours=forecast_horizon,
+        are_features_available_through_prediction_time=are_features_available_through_prediction_time,
     )
     feature_scaler = train_dataset.scaler_X
     target_scalers = train_dataset.scaler_y
@@ -249,6 +338,7 @@ def prepare_ercot_dataset(device=torch.device("cpu")):
         scaler_y=target_scalers,
         context_window_hours=context_length,
         prediction_horizon_hours=forecast_horizon,
+        are_features_available_through_prediction_time=are_features_available_through_prediction_time,
     )
     input_size = len(features)
     output_sizes = [len(t) for t in target_cols]
@@ -509,7 +599,8 @@ if __name__ == "__main__":
     # ---- LOAD DATASET ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for preparer in [
-        prepare_ercot_dataset,
+        prepare_ercot_full,
+        prepare_weather_full,
         prepare_housing_dataset,
     ]:
         logger.info(f"Preparing dataset using {preparer.__name__}")

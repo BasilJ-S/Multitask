@@ -12,8 +12,11 @@ from multitask.gridstatus_api import PREDICTION_NODES
 from multitask.logger import logger
 
 PATH = "multitask/data/"
-TRAIN_END_DATE = dt.datetime(2023, 1, 1, tzinfo=ZoneInfo("UTC"))
-VAL_END_DATE = dt.datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
+ERCOT_TRAIN_END_DATE = dt.datetime(2023, 1, 1, tzinfo=ZoneInfo("UTC"))
+ERCOT_VAL_END_DATE = dt.datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
+
+WEATHER_TRAIN_END_DATE = dt.datetime(2014, 1, 1, tzinfo=ZoneInfo("UTC"))
+WEATHER_VAL_END_DATE = dt.datetime(2015, 1, 1, tzinfo=ZoneInfo("UTC"))
 
 
 def path_to_file(filename: str) -> str:
@@ -48,11 +51,15 @@ class GridStatusDatasetConfig:
     transformations: list[GridstatusTransformation]
 
 
-def index_by_datetime(df: pd.DataFrame) -> pd.DataFrame:
+def index_by_datetime(
+    df: pd.DataFrame,
+    datetime_column: str = "interval_end_utc",
+    format: str | None = None,
+) -> pd.DataFrame:
     df = df.copy()
-    df["interval_end_utc"] = pd.to_datetime(df["interval_end_utc"])
-    df = df.set_index("interval_end_utc").sort_index()
-    df = df.drop(columns=["interval_start_utc"])
+    df[datetime_column] = pd.to_datetime(df[datetime_column], format=format, utc=True)
+    df = df.set_index(datetime_column).sort_index()
+    df = df.drop(columns=["interval_start_utc"], errors="ignore")
     return df
 
 
@@ -165,7 +172,7 @@ def ffill(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-CONFIG = [
+CONFIG_ERCOT = [
     GridStatusDatasetConfig(
         name="ercot_standardized_hourly",
         transformations=[
@@ -271,6 +278,27 @@ CONFIG = [
     ),
 ]
 
+CONFIG_WEATHER = [
+    GridStatusDatasetConfig(
+        name="max_planck_weather_ts",
+        transformations=[
+            GridstatusTransformation(
+                function=index_by_datetime,
+                parameters={
+                    "datetime_column": "Date Time",
+                    "format": "%d.%m.%Y %H:%M:%S",
+                },
+            ),
+            GridstatusTransformation(
+                function=downsample_to_hourly,
+            ),
+            GridstatusTransformation(
+                function=ffill,
+            ),
+        ],
+    ),
+]
+
 
 def get_inference_and_prediction_intervals(start: dt.datetime, end: dt.datetime):
     """Get inference and prediction intervals for the dataset."""
@@ -313,8 +341,42 @@ def get_inference_and_prediction_intervals(start: dt.datetime, end: dt.datetime)
     )
 
 
+def write_splits_with_inference_times(
+    full_dataset: pd.DataFrame,
+    train_end_date: dt.datetime,
+    val_end_date: dt.datetime,
+    file_name_prefix: str,
+) -> None:
+    """Write train/val/test splits along with inference times to CSV files."""
+
+    start, end = full_dataset.index.min(), full_dataset.index.max()
+    logger.info(f"Dataset covers from {start} to {end}")
+
+    train_set = full_dataset[full_dataset.index < train_end_date]
+    val_set = full_dataset[
+        (full_dataset.index >= train_end_date) & (full_dataset.index < val_end_date)
+    ]
+    test_set = full_dataset[full_dataset.index >= val_end_date]
+
+    for subset, name in [
+        (train_set, "train"),
+        (val_set, "validation"),
+        (test_set, "test"),
+    ]:
+        start, end = subset.index.min(), subset.index.max()
+
+        inf_times = get_inference_and_prediction_intervals(start, end)
+
+        subset_path = path_to_file(f"{file_name_prefix}_{name}_set")
+        subset.to_csv(subset_path)
+        logger.info(f"{name.capitalize()} set saved to {subset_path}")
+        inf_times_path = path_to_file(f"{file_name_prefix}_{name}_inference_times")
+        inf_times.to_csv(inf_times_path, index=False)
+        logger.info(f"{name.capitalize()} inference times saved to {inf_times_path}")
+
+
 if __name__ == "__main__":
-    dfs = apply_all_transformations(CONFIG)
+    dfs = apply_all_transformations(CONFIG_ERCOT)
 
     overall_df = dfs[0]
     for df in dfs[1:]:
@@ -328,24 +390,23 @@ if __name__ == "__main__":
 
     logger.info(f"Dataset covers from {start} to {end}")
 
-    train_set = overall_df[overall_df.index < TRAIN_END_DATE]
-    val_set = overall_df[
-        (overall_df.index >= TRAIN_END_DATE) & (overall_df.index < VAL_END_DATE)
-    ]
-    test_set = overall_df[overall_df.index >= VAL_END_DATE]
+    write_splits_with_inference_times(
+        overall_df,
+        train_end_date=ERCOT_TRAIN_END_DATE,
+        val_end_date=ERCOT_VAL_END_DATE,
+        file_name_prefix="gridstatus",
+    )
 
-    for subset, name in [
-        (train_set, "train"),
-        (val_set, "validation"),
-        (test_set, "test"),
-    ]:
-        start, end = subset.index.min(), subset.index.max()
+    # Prepare inference times for etth datasets
 
-        inf_times = get_inference_and_prediction_intervals(start, end)
+    dfs_weather = apply_all_transformations(CONFIG_WEATHER)
+    weather_df = dfs_weather[0]
+    weather_oath = path_to_file("weather_transformed")
+    weather_df.to_csv(weather_oath)
 
-        subset_path = path_to_file(f"gridstatus_{name}_set")
-        subset.to_csv(subset_path)
-        logger.info(f"{name.capitalize()} set saved to {subset_path}")
-        inf_times_path = path_to_file(f"gridstatus_{name}_inference_times")
-        inf_times.to_csv(inf_times_path, index=False)
-        logger.info(f"{name.capitalize()} inference times saved to {inf_times_path}")
+    write_splits_with_inference_times(
+        weather_df,
+        train_end_date=WEATHER_TRAIN_END_DATE,
+        val_end_date=WEATHER_VAL_END_DATE,
+        file_name_prefix="weather",
+    )
