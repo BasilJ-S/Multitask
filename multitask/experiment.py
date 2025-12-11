@@ -180,9 +180,7 @@ def get_loss_per_task(
     Compute per-task loss given predictions and targets.
     Returns a list of losses for each task.
     """
-    l_per_task = [
-        loss_fn(pred, y_i.float().to(device)) for pred, y_i in zip(predictions, targets)
-    ]
+    l_per_task = [loss_fn(pred, y_i.float()) for pred, y_i in zip(predictions, targets)]
     l_mean_per_task = [torch.mean(l_i) for l_i in l_per_task]
     return l_mean_per_task
 
@@ -345,7 +343,7 @@ if __name__ == "__main__":
             output_sizes,
             context_length,
             forecast_horizon,
-        ) = prepare_dataset(preparer, device=device)
+        ) = prepare_dataset(preparer, is_train=True)
 
         # Define study
 
@@ -357,7 +355,7 @@ if __name__ == "__main__":
         validation_dataloader = DataLoader(validation_dataset, batch_size=128)
 
         results = run_baselines(train_dataset, validation_dataset)
-        for model, model_objective in model_list:
+        for model, model_objective, _ in model_list:
             study = optuna.create_study(
                 direction="minimize",
                 study_name=f"{preparer.__name__}_{model.__name__}_study",
@@ -376,24 +374,91 @@ if __name__ == "__main__":
             )
             study.optimize(objective, n_trials=20)
 
-    # Not needed for study.
-    # ---- PLOT RESULTS ----
-    plot_task_loss_separately(results, targets)
-    fig, axs = plt.subplots(1, 2, figsize=(28, 12))
+    results = {}
+    for preparer in [prepare_ercot_full, prepare_weather_full, prepare_housing_dataset]:
+        logger.info(f"Preparing dataset using {preparer.__name__}")
+        (
+            train_dataset,
+            validation_dataset,
+            features,
+            targets,
+            task_weights,
+            target_scalers,
+            input_size,
+            output_sizes,
+            context_length,
+            forecast_horizon,
+        ) = prepare_dataset(preparer, is_train=False)
 
-    plot_task_loss_same_plot(results, targets, axs, 0)
-    plot_loss(results, axs, 1)
+        # Define study
 
-    # Add labels describing each task for whole figure
-    fig.suptitle(f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16)
-    task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
-    fig.text(
-        0.5,
-        0.04,
-        ", ".join(task_text),
-        ha="center",
-        fontsize=10,
-    )
+        model_list = MODEL_LIST
 
-    plt.savefig("multitask_mlp_comparison.png")
-    plt.show()
+        loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
+
+        train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+        validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+
+        results = run_baselines(train_dataset, validation_dataset)
+        for model, model_objective, param_converter in model_list:
+            study = optuna.create_study(
+                direction="minimize",
+                study_name=f"{preparer.__name__}_{model.__name__}_study",
+                storage="sqlite:///multitask_model_comparison.db",
+                load_if_exists=True,
+            )
+
+            best_params = study.best_trial.params
+            logger.info(
+                f"Best params for model {model.__name__} on dataset {preparer.__name__}: {best_params}"
+            )
+            model_params = {
+                k: v
+                for k, v in best_params.items()
+                if k not in ["lr", "weight_decay", "seed"]
+            }
+            model_params = param_converter(**model_params)
+            model = NaiveMultiTaskTimeseriesWrapper(
+                model,
+                input_size=input_size,
+                output_sizes=output_sizes,
+                context_length=context_length,
+                forecast_horizon=forecast_horizon,
+                **model_params,
+            ).to(device)
+            lr = best_params["lr"]
+            wd = best_params["weight_decay"]
+            results[get_model_name(model)] = train_and_evaluate(
+                model,
+                train_dataloader,
+                validation_dataloader,
+                loss,
+                task_weights,
+                target_scalers,
+                device=device,
+                lr=lr,
+                wd=wd,
+            )
+
+        # ---- PLOT RESULTS ----
+        plot_task_loss_separately(results, targets)
+        fig, axs = plt.subplots(1, 2, figsize=(28, 12))
+
+        plot_task_loss_same_plot(results, targets, axs, 0)
+        plot_loss(results, axs, 1)
+
+        # Add labels describing each task for whole figure
+        fig.suptitle(
+            f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16
+        )
+        task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
+        fig.text(
+            0.5,
+            0.04,
+            ", ".join(task_text),
+            ha="center",
+            fontsize=10,
+        )
+
+        plt.savefig("multitask_mlp_comparison.png")
+        plt.show()

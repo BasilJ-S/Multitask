@@ -1,3 +1,4 @@
+from operator import is_
 from typing import Callable, Protocol
 
 import pandas as pd
@@ -23,7 +24,7 @@ from multitask.utils.logger import logger
 
 
 class DataProvider(Protocol):
-    def __call__(self, device=torch.device("cpu")) -> tuple[
+    def __call__(self, is_train: bool) -> tuple[
         torch.utils.data.Dataset,  # train dataset
         torch.utils.data.Dataset,  # validation dataset
         list[str],  # feature names
@@ -37,15 +38,19 @@ class DataProvider(Protocol):
     ]: ...
 
 
-def prepare_dataset(data_preparer: DataProvider, device=torch.device("cpu")):
-    return data_preparer(device=device)
+def prepare_dataset(data_preparer: DataProvider, is_train: bool):
+    logger.info(f"Preparing dataset with is_train={is_train}...")
+    return data_preparer(is_train=is_train)
 
 
-def prepare_housing_dataset(device=torch.device("cpu")):
+def prepare_housing_dataset(is_train=True):
     ds = load_dataset("gvlassis/california_housing").with_format("torch")
 
     hf_train: hfDataset = ds["train"]  # type: ignore
-    hf_validation: hfDataset = ds["validation"]  # type: ignore
+    if is_train:
+        hf_validation: hfDataset = ds["validation"]  # type: ignore
+    else:
+        hf_validation: hfDataset = ds["test"]  # type: ignore
 
     targets = [["MedHouseVal", "AveRooms"], ["Longitude"]]
     task_weights = [1.0, 0.5]  # Weight for each task in the loss computation
@@ -88,16 +93,26 @@ def prepare_housing_dataset(device=torch.device("cpu")):
     )
 
 
-def prepare_weather_data():
+def prepare_weather_data(is_train=True):
     train = pd.read_csv(path_to_file("weather_train_set"), index_col="Date Time")
     train_inference_times = pd.read_csv(path_to_file("weather_train_inference_times"))
-    validation = pd.read_csv(
-        path_to_file("weather_validation_set"),
-        index_col="Date Time",
-    )
-    validation_inference_times = pd.read_csv(
-        path_to_file("weather_validation_inference_times")
-    )
+
+    if is_train:
+        validation = pd.read_csv(
+            path_to_file("weather_validation_set"),
+            index_col="Date Time",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("weather_validation_inference_times")
+        )
+    else:
+        validation = pd.read_csv(
+            path_to_file("weather_test_set"),
+            index_col="Date Time",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("weather_test_inference_times")
+        )
 
     target_cols = [
         ["T (degC)", "Tpot (K)", "Tdew (degC)"],
@@ -133,7 +148,7 @@ def prepare_weather_data():
     )
 
 
-def prepare_ercot_data():
+def prepare_ercot_data(is_train=True):
     train = pd.read_csv(
         path_to_file("gridstatus_train_set"),
         index_col="interval_end_utc",
@@ -141,13 +156,23 @@ def prepare_ercot_data():
     train_inference_times = pd.read_csv(
         path_to_file("gridstatus_train_inference_times")
     )
-    validation = pd.read_csv(
-        path_to_file("gridstatus_validation_set"),
-        index_col="interval_end_utc",
-    )
-    validation_inference_times = pd.read_csv(
-        path_to_file("gridstatus_validation_inference_times")
-    )
+    if is_train:
+        validation = pd.read_csv(
+            path_to_file("gridstatus_validation_set"),
+            index_col="interval_end_utc",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("gridstatus_validation_inference_times")
+        )
+    else:
+        logger.info("Using test set as validation set for ERCOT dataset WOOOOOO...")
+        validation = pd.read_csv(
+            path_to_file("gridstatus_test_set"),
+            index_col="interval_end_utc",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("gridstatus_test_inference_times")
+        )
 
     target_cols = [[f"spp_{prediction_node}"] for prediction_node in PREDICTION_NODES]
     all_targets = [t for sublist in target_cols for t in sublist]
@@ -177,15 +202,15 @@ def prepare_ercot_data():
     )
 
 
-def prepare_ercot_full(device=torch.device("cpu")):
-    return prepare_timeseries_dataset(prepare_ercot_data, device=device)
+def prepare_ercot_full(is_train=True):
+    return prepare_timeseries_dataset(prepare_ercot_data, is_train=is_train)
 
 
-def prepare_weather_full(device=torch.device("cpu")):
-    return prepare_timeseries_dataset(prepare_weather_data, device=device)
+def prepare_weather_full(is_train=True):
+    return prepare_timeseries_dataset(prepare_weather_data, is_train=is_train)
 
 
-def prepare_timeseries_dataset(data_preparer: Callable, device=torch.device("cpu")):
+def prepare_timeseries_dataset(data_preparer: Callable, is_train=True):
 
     (
         train,
@@ -198,7 +223,7 @@ def prepare_timeseries_dataset(data_preparer: Callable, device=torch.device("cpu
         context_length,
         forecast_horizon,
         are_features_available_through_prediction_time,
-    ) = data_preparer()
+    ) = data_preparer(is_train=is_train)
 
     # ---- CREATE PRE-SCALED DATASETS ----
     train_dataset = PreScaledTimeseriesDataset(
