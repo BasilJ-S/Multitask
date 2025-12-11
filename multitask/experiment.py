@@ -211,7 +211,7 @@ def train_and_evaluate(
         f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
     )
     optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=wd)
-    t = trange(25, unit="epoch")
+    t = trange(150, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
             train_dataloader,
