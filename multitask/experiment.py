@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import trange
 
 from multitask.data_provider.data_providers import (
-    model_factory,
     prepare_dataset,
     prepare_ercot_full,
     prepare_housing_dataset,
