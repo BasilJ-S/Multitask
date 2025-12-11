@@ -130,6 +130,20 @@ def merge_by_location(
     return df
 
 
+def remove_negative_values(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Remove negative values from specified columns in the dataframe."""
+    df = df.copy()
+    for col in columns:
+        if col in df.columns:
+            num_negatives = (df[col] < 0).sum()
+            if num_negatives > 0:
+                logger.info(
+                    f"Removing {num_negatives} negative values from column {col}"
+                )
+                df.loc[df[col] < 0, col] = pd.NA
+    return df
+
+
 def downsample_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     """Resample the dataframe to hourly frequency by averaging."""
     df = df.copy()
@@ -287,6 +301,12 @@ CONFIG_WEATHER = [
             ),
             GridstatusTransformation(
                 function=downsample_to_hourly,
+            ),
+            GridstatusTransformation(
+                function=remove_negative_values,
+                parameters={  # Remove negative values in wind speed columns (sentinel values
+                    "columns": ["wv (m/s)", "max. wv (m/s)"],
+                },
             ),
             GridstatusTransformation(
                 function=ffill,
