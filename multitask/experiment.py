@@ -192,6 +192,86 @@ def get_model_name(model: torch.nn.Module) -> str:
     return model.__class__.__name__
 
 
+def train_and_evaluate(
+    model: torch.nn.Module,
+    train_dataloader: DataLoader,
+    validation_dataloader: DataLoader,
+    loss: torch.nn.Module,
+    task_weights: list[float],
+    target_scalers: list[StandardScaler],
+    device=torch.device("cpu"),
+) -> list[dict]:
+    patience = 5
+    epochs_no_improve = 0
+    best_val_loss = float("inf")
+    results = []
+    logger.info(
+        f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
+    )
+    optimizer = optim.Adam(params=model.parameters(), lr=0.001)
+    t = trange(25, unit="epoch")
+    for _epoch in t:
+        train_loss = run_epoch(
+            train_dataloader,
+            model,
+            loss,
+            task_weights=task_weights,
+            optimizer=optimizer,
+            device=device,
+        )
+
+        val_loss = run_epoch(
+            validation_dataloader,
+            model,
+            loss,
+            task_weights=task_weights,
+            optimizer=None,
+            device=device,
+        )
+
+        results.append(
+            {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
+        )
+        mean_val_loss = np.mean(val_loss)
+
+        if mean_val_loss < best_val_loss:
+            best_val_loss = mean_val_loss
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            logger.info(
+                f"No improvement in validation loss for {epochs_no_improve} epochs."
+            )
+        if epochs_no_improve >= patience:
+            logger.info(
+                f"Early stopping triggered after {_epoch} epochs for model {get_model_name(model)}."
+            )
+            logger.info(
+                f"Best validation loss: {best_val_loss} achieved. Epochs without improvement: {epochs_no_improve}."
+            )
+            break
+
+        message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
+        t.set_description(message)
+        t.write(message)
+
+    # Validate on unscaled data for interpretability
+    val_loss_unscaled = run_epoch(
+        validation_dataloader,
+        model,
+        loss,
+        task_weights=task_weights,
+        optimizer=None,
+        device=device,
+        reverse_task_scalers=target_scalers,
+    )
+    logger.info(
+        f"Final unscaled validation MSE for model {get_model_name(model)}: {val_loss_unscaled}"
+    )
+    results[-1]["val_loss_unscaled"] = val_loss_unscaled
+    return results
+
+
 if __name__ == "__main__":
     # ---- LOAD DATASET ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -214,6 +294,8 @@ if __name__ == "__main__":
             forecast_horizon,
         ) = prepare_dataset(preparer, device=device)
 
+        # Define study
+
         model_list = model_factory(
             input_size=input_size,
             output_sizes=output_sizes,
@@ -222,8 +304,6 @@ if __name__ == "__main__":
             device=device,
         )
 
-        patience = 5
-
         loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
 
         train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
@@ -231,72 +311,15 @@ if __name__ == "__main__":
 
         results = run_baselines(train_dataset, validation_dataset)
         for model in model_list:
-            epochs_no_improve = 0
-            best_val_loss = float("inf")
-            results[get_model_name(model)] = []
-            logger.info(
-                f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
+            results[get_model_name(model)] = train_and_evaluate(
+                model,
+                train_dataloader,
+                validation_dataloader,
+                loss,
+                task_weights,
+                target_scalers,
+                device=device,
             )
-            optimizer = optim.Adam(params=model.parameters(), lr=0.001)
-            t = trange(25, unit="epoch")
-            for _epoch in t:
-                train_loss = run_epoch(
-                    train_dataloader,
-                    model,
-                    loss,
-                    task_weights=task_weights,
-                    optimizer=optimizer,
-                    device=device,
-                )
-
-                val_loss = run_epoch(
-                    validation_dataloader,
-                    model,
-                    loss,
-                    task_weights=task_weights,
-                    optimizer=None,
-                    device=device,
-                )
-
-                results[get_model_name(model)].append(
-                    {"epoch": _epoch, "train_loss": train_loss, "val_loss": val_loss}
-                )
-                mean_val_loss = np.mean(val_loss)
-
-                if mean_val_loss < best_val_loss:
-                    best_val_loss = mean_val_loss
-                    epochs_no_improve = 0
-                else:
-                    epochs_no_improve += 1
-                    logger.info(
-                        f"No improvement in validation loss for {epochs_no_improve} epochs."
-                    )
-                if epochs_no_improve >= patience:
-                    logger.info(
-                        f"Early stopping triggered after {_epoch} epochs for model {get_model_name(model)}."
-                    )
-                    logger.info(
-                        f"Best validation loss: {best_val_loss} achieved. Epochs without improvement: {epochs_no_improve}."
-                    )
-                    break
-
-                message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
-                t.set_description(message)
-                t.write(message)
-
-        # Validate on unscaled data for interpretability
-        val_loss_unscaled = run_epoch(
-            validation_dataloader,
-            model,
-            loss,
-            task_weights=task_weights,
-            optimizer=None,
-            device=device,
-            reverse_task_scalers=target_scalers,
-        )
-        logger.info(
-            f"Final unscaled validation MSE for model {get_model_name(model)}: {val_loss_unscaled}"
-        )
 
         # ---- PLOT RESULTS ----
         plot_task_loss_separately(results, targets)
