@@ -2,6 +2,8 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 
+from multitask.models.baselines import BASELINE_NAMES
+
 PLOT_COLOURS = ["b", "g", "r", "c", "m", "y", "k"]
 PLOT_LINESTYLES = [
     "-",
@@ -13,7 +15,7 @@ PLOT_LINESTYLES = [
     "--",
     ":",
 ]
-BASELINE_COLOURS = ["gray", "black"]
+BASELINE_COLOURS = ["gray", "black", "purple", "orange"]
 
 
 def plot_task_loss_same_plot(
@@ -65,11 +67,10 @@ def plot_task_loss_separately(
     )
     axs = axs.flatten() if num_rows > 1 else axs
 
-    for baseline_name, baseline_results, baseline_color in [
-        ("Global Mean", results.pop("global_mean", None), "gray"),
-        ("Linear", results.pop("linear", None), "black"),
-        ("XGBoost", results.pop("xgboost", None), "purple"),
-    ]:
+    for i, baseline_name in enumerate(BASELINE_NAMES):
+        baseline_color = BASELINE_COLOURS[i % len(BASELINE_COLOURS)]
+        baseline_results = results.pop(baseline_name, None)
+
         if baseline_results is not None:
             # add horizontal lines for baseline
             for j, task in enumerate(targets):

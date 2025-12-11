@@ -4,7 +4,6 @@ import os
 import gridstatusio as gf
 import keyring
 import pandas as pd
-from datasets import Dataset as hfDataset
 
 """
 Note: This module requires access to the GridStatusIO API, and as is will pull ~700000 rows of data.

@@ -3,7 +3,7 @@ import logging
 
 import pandas as pd
 
-from multitask.preprocess_gridstatus_dataset import (
+from multitask.data.preprocess_gridstatus_dataset import (
     add_lags_to_actuals,
     downsample_to_hourly,
     merge_by_location,
