@@ -15,7 +15,7 @@ PLOT_LINESTYLES = [
     "--",
     ":",
 ]
-BASELINE_COLOURS = ["gray", "black", "purple", "orange"]
+BASELINE_COLOURS = ["gray", "black", "purple", "orange", "brown"]
 
 
 def plot_task_loss_same_plot(
@@ -59,7 +59,7 @@ def plot_task_loss_separately(
     targets: list[list[str]],
     colors: list[str] = PLOT_COLOURS,
 ) -> None:
-    num_rows = len(targets) // 2
+    num_rows = (len(targets) + 1) // 2
     fig, axs = plt.subplots(
         num_rows,
         2,
@@ -134,6 +134,7 @@ def plot_task_loss_separately(
     fig.legend(loc="lower center")
 
     fig.suptitle("Loss per Task")
+    fig.show()
 
 
 def plot_loss(
@@ -165,3 +166,45 @@ def plot_loss(
     axs[index].set_xlabel("Epoch")
     axs[index].set_ylabel("Loss")
     axs[index].legend()
+
+
+def plot_test_loss(test_results: dict, targets):
+    num_rows = (len(targets) + 1) // 2
+    fig, axs = plt.subplots(
+        num_rows,
+        2,
+        figsize=(12, num_rows * 4),
+    )
+    axs = axs.flatten() if num_rows > 1 else axs
+
+    model_names = list(test_results.keys())
+    x = range(len(model_names))
+    bar_width = 0.8 / len(model_names)
+
+    for j, task in enumerate(targets):
+        for i, name in enumerate(model_names):
+            baseline_results = test_results.get(name, None)
+
+            if baseline_results is not None:
+                task_test_loss = baseline_results[j]
+                baseline_color = BASELINE_COLOURS[i % len(BASELINE_COLOURS)]
+
+                axs[j].bar(
+                    i * bar_width,
+                    task_test_loss,
+                    bar_width,
+                    label=name if j == 0 else "",
+                    color=baseline_color,
+                )
+
+        axs[j].set_title(f"Loss for {task}")
+        axs[j].set_xlabel("Model")
+        axs[j].set_ylabel("Loss")
+        axs[j].set_xticks([i * bar_width + bar_width / 2 for i in x])
+
+    fig.tight_layout()
+    fig.subplots_adjust(bottom=0.2)
+
+    fig.legend(loc="lower center")
+    fig.suptitle("Test Loss per Task")
+    fig.show()

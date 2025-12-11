@@ -1,3 +1,7 @@
+import argparse
+import json
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
@@ -26,6 +30,7 @@ from multitask.utils.plotter import (
     plot_loss,
     plot_task_loss_same_plot,
     plot_task_loss_separately,
+    plot_test_loss,
 )
 
 
@@ -211,7 +216,7 @@ def train_and_evaluate(
         f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
     )
     optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=wd)
-    t = trange(25, unit="epoch")
+    t = trange(150, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
             train_dataloader,
@@ -254,8 +259,9 @@ def train_and_evaluate(
             break
 
         message = f"Model {get_model_name(model)} | Epoch {_epoch} | Train: {train_loss} | Val: {val_loss}"
-        t.set_description(message)
-        t.write(message)
+        if _epoch % 10 == 0:
+            t.set_description(message)
+            t.write(message)
 
     # Validate on unscaled data for interpretability
     val_loss_unscaled = run_epoch(
@@ -282,11 +288,18 @@ def objective_builder(
     context_length: int,
     forecast_horizon: int,
     device=torch.device("cpu"),
+    seed=42,
+    save_dir: str | None = None,
 ):
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+    best_loss = float("inf")
+
     def objective(trial):
-        seed = trial.suggest_int("seed", 0, 10000)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+        nonlocal best_loss
+        current_seed = seed + trial.number
+        torch.manual_seed(current_seed)
+        np.random.seed(current_seed)
         model_params = model_objective(trial)
         lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
         wd = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
@@ -319,153 +332,233 @@ def objective_builder(
         trial.set_user_attr("train_loss", np.mean(train_loss))
         trial.set_user_attr("val_loss_unscaled", np.mean(val_loss_unscaled))
 
+        if val_loss < best_loss:
+            best_loss = val_loss
+            if save_dir is not None:
+                model_path = os.path.join(save_dir, "best_model.pt")
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "trial_params": trial.params,
+                        "val_loss": val_loss,
+                        "trial_number": trial.number,
+                    },
+                    model_path,
+                )
+                logger.info(
+                    f"New best model saved! Trial {trial.number}, Loss: {val_loss:.4f}"
+                )
+
         return val_loss
 
     return objective
 
 
+def get_save_dir(preparer_name: str, model_name: str) -> str:
+    return f"multitask/model_store/{preparer_name}/{model_name}"
+
+
 if __name__ == "__main__":
-    # ---- LOAD DATASET ----
+
+    args = argparse.ArgumentParser(description="Multi-Task Learning Experiment")
+    args.add_argument(
+        "--study",
+        action="store_true",
+        help="Run study on train and eval sets",
+    )
+    args.add_argument("--eval", action="store_true", help="Evaluate models on test set")
+    args = args.parse_args()
+    if not args.study and not args.eval:
+        logger.error("Please specify --study and/or --eval to run the experiment.")
+        exit(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    for preparer in [
-        prepare_weather_multiloc_full,
-        prepare_ercot_full,
-        prepare_weather_full,
-        prepare_housing_dataset,
-    ]:
-        logger.info(f"Preparing dataset using {preparer.__name__}")
-        (
-            train_dataset,
-            validation_dataset,
-            features,
-            targets,
-            task_weights,
-            target_scalers,
-            input_size,
-            output_sizes,
-            context_length,
-            forecast_horizon,
-        ) = prepare_dataset(preparer, is_train=True)
-
-        # Define study
-
-        model_list = MODEL_LIST
-
-        loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
-
-        train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-        validation_dataloader = DataLoader(validation_dataset, batch_size=128)
-
-        results = run_baselines(train_dataset, validation_dataset)
-        for model, model_objective, _ in model_list:
-            study = optuna.create_study(
-                direction="minimize",
-                study_name=f"{preparer.__name__}_{model.__name__}_study",
-                storage="sqlite:///multitask_model_comparison.db",
-                load_if_exists=True,
-            )
-
-            objective = objective_builder(
-                model_objective,
-                model,
+    if args.study:
+        # ---- LOAD DATASET ----
+        for preparer in [
+            prepare_weather_multiloc_full,
+            prepare_ercot_full,
+            prepare_weather_full,
+            prepare_housing_dataset,
+        ]:
+            logger.info(f"Preparing dataset using {preparer.__name__}")
+            (
+                train_dataset,
+                validation_dataset,
+                features,
+                targets,
+                task_weights,
+                target_scalers,
                 input_size,
                 output_sizes,
                 context_length,
                 forecast_horizon,
-                device=device,
-            )
-            study.optimize(objective, n_trials=20)
+            ) = prepare_dataset(preparer, is_train=True)
 
-    results = {}
-    for preparer in [
-        prepare_weather_multiloc_full,
-        prepare_ercot_full,
-        prepare_weather_full,
-        prepare_housing_dataset,
-    ]:
-        logger.info(f"Preparing dataset using {preparer.__name__}")
-        (
-            train_dataset,
-            validation_dataset,
-            features,
-            targets,
-            task_weights,
-            target_scalers,
-            input_size,
-            output_sizes,
-            context_length,
-            forecast_horizon,
-        ) = prepare_dataset(preparer, is_train=False)
+            # Define study
 
-        # Define study
+            model_list = MODEL_LIST
 
-        model_list = MODEL_LIST
+            loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
 
-        loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
+            train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+            validation_dataloader = DataLoader(validation_dataset, batch_size=128)
 
-        train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-        validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+            results = {}  # run_baselines(train_dataset, validation_dataset)
+            for model_cls, model_objective, _ in model_list:
+                study = optuna.create_study(
+                    direction="minimize",
+                    study_name=f"{preparer.__name__}_{model_cls.__name__}_study",
+                    storage="sqlite:///multitask_model_comparison.db",
+                    load_if_exists=True,
+                )
+                save_dir = get_save_dir(preparer.__name__, model_cls.__name__)
 
-        results = run_baselines(train_dataset, validation_dataset)
-        for model, model_objective, param_converter in model_list:
-            study = optuna.create_study(
-                direction="minimize",
-                study_name=f"{preparer.__name__}_{model.__name__}_study",
-                storage="sqlite:///multitask_model_comparison.db",
-                load_if_exists=True,
-            )
+                objective = objective_builder(
+                    model_objective,
+                    model_cls,
+                    input_size,
+                    output_sizes,
+                    context_length,
+                    forecast_horizon,
+                    device=device,
+                    save_dir=save_dir,
+                )
+                study.optimize(objective, n_trials=20)
 
-            best_params = study.best_trial.params
-            logger.info(
-                f"Best params for model {model.__name__} on dataset {preparer.__name__}: {best_params}"
-            )
-            model_params = {
-                k: v
-                for k, v in best_params.items()
-                if k not in ["lr", "weight_decay", "seed"]
-            }
-            model_params = param_converter(**model_params)
-            model = NaiveMultiTaskTimeseriesWrapper(
-                model,
-                input_size=input_size,
-                output_sizes=output_sizes,
-                context_length=context_length,
-                forecast_horizon=forecast_horizon,
-                **model_params,
-            ).to(device)
-            lr = best_params["lr"]
-            wd = best_params["weight_decay"]
-            results[get_model_name(model)] = train_and_evaluate(
-                model,
-                train_dataloader,
-                validation_dataloader,
-                loss,
+    if args.eval:
+
+        results = {}
+        for preparer in [
+            prepare_weather_multiloc_full,
+            prepare_ercot_full,
+            prepare_weather_full,
+            prepare_housing_dataset,
+        ]:
+            logger.info(f"Preparing dataset using {preparer.__name__}")
+            (
+                train_dataset,
+                validation_dataset,
+                features,
+                targets,
                 task_weights,
                 target_scalers,
-                device=device,
-                lr=lr,
-                wd=wd,
+                input_size,
+                output_sizes,
+                context_length,
+                forecast_horizon,
+            ) = prepare_dataset(preparer, is_train=False)
+
+            # Define study
+
+            model_list = MODEL_LIST
+
+            loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
+
+            train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
+            validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+
+            results = run_baselines(train_dataset, validation_dataset)
+            test_results = results.copy()
+            for k, v in results.items():
+                test_results[k] = v["val_loss"]
+            for model_cls, model_objective, param_converter in model_list:
+
+                model_state_dict = torch.load(
+                    os.path.join(
+                        get_save_dir(preparer.__name__, model_cls.__name__),
+                        "best_model.pt",
+                    ),
+                    map_location=device,
+                    weights_only=False,
+                )
+
+                # Use the parameters that were saved with the model to ensure architecture matches
+                best_params = model_state_dict.get("trial_params", {})
+                logger.info(
+                    f"Best params for model {model_cls.__name__} on dataset {preparer.__name__}: {best_params}"
+                )
+                model_params = {
+                    k: v
+                    for k, v in best_params.items()
+                    if k not in ["lr", "weight_decay", "seed"]
+                }
+                model_params = param_converter(**model_params)
+
+                model = NaiveMultiTaskTimeseriesWrapper(
+                    model_cls,
+                    input_size=input_size,
+                    output_sizes=output_sizes,
+                    context_length=context_length,
+                    forecast_horizon=forecast_horizon,
+                    **model_params,
+                ).to(device)
+                model.load_state_dict(model_state_dict["model_state_dict"])
+
+                lr = best_params["lr"]
+                wd = best_params["weight_decay"]
+                test_loss_unscaled = run_epoch(
+                    validation_dataloader,
+                    model,
+                    loss,
+                    task_weights=task_weights,
+                    optimizer=None,
+                    device=device,
+                    reverse_task_scalers=target_scalers,
+                )
+                test_results[get_model_name(model)] = test_loss_unscaled
+                clean_model = NaiveMultiTaskTimeseriesWrapper(
+                    model_cls,
+                    input_size=input_size,
+                    output_sizes=output_sizes,
+                    context_length=context_length,
+                    forecast_horizon=forecast_horizon,
+                    **model_params,
+                ).to(device)
+                results[get_model_name(model)] = train_and_evaluate(
+                    model,
+                    train_dataloader,
+                    validation_dataloader,
+                    loss,
+                    task_weights,
+                    target_scalers,
+                    device=device,
+                    lr=lr,
+                    wd=wd,
+                )
+            with open(f"test_results_{preparer.__name__}.json", "w") as file:
+                json.dump(
+                    test_results, file, indent=4
+                )  # 'indent' makes the file human-readable
+            with open(f"training_results_{preparer.__name__}.json", "w") as file:
+                json.dump(
+                    results, file, indent=4
+                )  # 'indent' makes the file human-readable
+            with open(f"targets_{preparer.__name__}.json", "w") as file:
+                json.dump(targets, file, indent=4)
+            logger.info(f"Test results: {test_results}")
+            logger.info(f"Training results: {results}")
+            logger.info(f"Targets: {targets}")
+
+            # ---- PLOT RESULTS ----
+            plot_task_loss_separately(results, targets)
+            fig, axs = plt.subplots(1, 2, figsize=(28, 12))
+
+            plot_task_loss_same_plot(results, targets, axs, 0)
+            plot_loss(results, axs, 1)
+            plot_test_loss(test_results, targets)
+
+            # Add labels describing each task for whole figure
+            fig.suptitle(
+                f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16
+            )
+            task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
+            fig.text(
+                0.5,
+                0.04,
+                ", ".join(task_text),
+                ha="center",
+                fontsize=10,
             )
 
-        # ---- PLOT RESULTS ----
-        plot_task_loss_separately(results, targets)
-        fig, axs = plt.subplots(1, 2, figsize=(28, 12))
-
-        plot_task_loss_same_plot(results, targets, axs, 0)
-        plot_loss(results, axs, 1)
-
-        # Add labels describing each task for whole figure
-        fig.suptitle(
-            f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16
-        )
-        task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
-        fig.text(
-            0.5,
-            0.04,
-            ", ".join(task_text),
-            ha="center",
-            fontsize=10,
-        )
-
-        plt.savefig("multitask_mlp_comparison.png")
-        plt.show()
+            plt.savefig("multitask_mlp_comparison.png")
+            plt.show()
