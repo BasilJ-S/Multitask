@@ -12,6 +12,7 @@ from multitask.data_provider.data_providers import (
     prepare_ercot_full,
     prepare_housing_dataset,
     prepare_weather_full,
+    prepare_weather_multiloc_full,
 )
 from multitask.data_provider.multi_datasets import (
     PreScaledHFDataset,
@@ -327,6 +328,7 @@ if __name__ == "__main__":
     # ---- LOAD DATASET ----
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     for preparer in [
+        prepare_weather_multiloc_full,
         prepare_ercot_full,
         prepare_weather_full,
         prepare_housing_dataset,
@@ -375,7 +377,12 @@ if __name__ == "__main__":
             study.optimize(objective, n_trials=20)
 
     results = {}
-    for preparer in [prepare_ercot_full, prepare_weather_full, prepare_housing_dataset]:
+    for preparer in [
+        prepare_weather_multiloc_full,
+        prepare_ercot_full,
+        prepare_weather_full,
+        prepare_housing_dataset,
+    ]:
         logger.info(f"Preparing dataset using {preparer.__name__}")
         (
             train_dataset,

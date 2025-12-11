@@ -7,7 +7,7 @@ from datasets import Dataset as hfDataset
 from datasets import load_dataset
 from sklearn.preprocessing import StandardScaler
 
-from multitask.data.preprocess_gridstatus_dataset import path_to_file
+from multitask.data.preprocess_gridstatus_dataset import LOCATION_NAMES, path_to_file
 from multitask.data_provider.multi_datasets import (
     PREDICTION_NODES,
     PreScaledHFDataset,
@@ -148,6 +148,73 @@ def prepare_weather_data(is_train=True):
     )
 
 
+def prepare_weather_multiloc_data(is_train=True):
+    train = pd.read_csv(
+        path_to_file("weather_multiloc_train_set"),
+        index_col="constructed_datetime",
+    )
+    logger.info(
+        "Loaded weather multiloc training data from {}.".format(
+            path_to_file("weather_multiloc_train_set")
+        )
+    )
+    logger.info(train)
+    train_inference_times = pd.read_csv(
+        path_to_file("weather_multiloc_train_inference_times")
+    )
+    if is_train:
+        validation = pd.read_csv(
+            path_to_file("weather_multiloc_validation_set"),
+            index_col="constructed_datetime",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("weather_multiloc_validation_inference_times")
+        )
+    else:
+        logger.info("Using test set as validation set for ERCOT dataset WOOOOOO...")
+        validation = pd.read_csv(
+            path_to_file("weather_multiloc_test_set"),
+            index_col="constructed_datetime",
+        )
+        validation_inference_times = pd.read_csv(
+            path_to_file("weather_multiloc_test_inference_times")
+        )
+
+    for loc in LOCATION_NAMES:
+        logger.info(f"Location: {loc}")
+
+    target_cols = []
+    for loc in LOCATION_NAMES:
+        target_cols.append([col for col in train.columns if col.endswith(f"_{loc}")])
+
+    features = [col for col in train.columns]
+    task_weights = [1.0 for _ in target_cols]  # Weight for each task equally
+
+    are_features_available_through_prediction_time = False
+
+    context_length = 24 * 2  # 2 days
+    forecast_horizon = 24  # 1 day
+
+    for i, target_group in enumerate(target_cols):
+        logger.info(
+            f"Targets for Task {i} with weight: {task_weights[i]}: {target_group}"
+        )
+
+    logger.info(f"Index is of type: {train.index.dtype}, values: {train.index[:5]}")
+    return (
+        train,
+        train_inference_times,
+        validation,
+        validation_inference_times,
+        features,
+        target_cols,
+        task_weights,
+        context_length,
+        forecast_horizon,
+        are_features_available_through_prediction_time,
+    )
+
+
 def prepare_ercot_data(is_train=True):
     train = pd.read_csv(
         path_to_file("gridstatus_train_set"),
@@ -208,6 +275,10 @@ def prepare_ercot_full(is_train=True):
 
 def prepare_weather_full(is_train=True):
     return prepare_timeseries_dataset(prepare_weather_data, is_train=is_train)
+
+
+def prepare_weather_multiloc_full(is_train=True):
+    return prepare_timeseries_dataset(prepare_weather_multiloc_data, is_train=is_train)
 
 
 def prepare_timeseries_dataset(data_preparer: Callable, is_train=True):
