@@ -282,11 +282,12 @@ def objective_builder(
     context_length: int,
     forecast_horizon: int,
     device=torch.device("cpu"),
+    seed=42,
 ):
     def objective(trial):
-        seed = trial.suggest_int("seed", 0, 10000)
-        torch.manual_seed(seed)
-        np.random.seed(seed)
+        current_seed = seed + trial.number
+        torch.manual_seed(current_seed)
+        np.random.seed(current_seed)
         model_params = model_objective(trial)
         lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
         wd = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
