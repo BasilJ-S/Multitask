@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from multitask.data.gridstatus_api import PREDICTION_NODES
+from multitask.data.nrl_api import LOCATION_NAMES
 from multitask.utils.logger import logger
 from multitask.utils.utils import path_to_file
 
@@ -17,6 +18,13 @@ ERCOT_VAL_END_DATE = dt.datetime(2024, 1, 1, tzinfo=ZoneInfo("UTC"))
 
 WEATHER_TRAIN_END_DATE = dt.datetime(2014, 1, 1, tzinfo=ZoneInfo("UTC"))
 WEATHER_VAL_END_DATE = dt.datetime(2015, 1, 1, tzinfo=ZoneInfo("UTC"))
+
+WEATHER_MULTILOC_TRAIN_END_DATE = dt.datetime(
+    2021, 1, 1, tzinfo=ZoneInfo("UTC")
+)  # 2018-2020 test
+WEATHER_MULTILOC_VAL_END_DATE = dt.datetime(
+    2022, 1, 1, tzinfo=ZoneInfo("UTC")
+)  # 2021 val, 2022-2023 test
 
 
 ACTUALS_STANDARD = [
@@ -182,6 +190,33 @@ def ffill(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_date_from_components(
+    df: pd.DataFrame,
+    year_col: str = "Year",
+    month_col: str = "Month",
+    day_col: str = "Day",
+    hour_col: str = "Hour",
+    minute_col: str = "Minute",
+) -> pd.DataFrame:
+    df = df.copy()
+    df["constructed_datetime"] = pd.to_datetime(
+        dict(  # type: ignore
+            year=df[year_col],
+            month=df[month_col],
+            day=df[day_col],
+            hour=df[hour_col],
+            minute=df[minute_col],
+        ),
+        utc=True,
+    )
+    df = df.drop(
+        columns=[year_col, month_col, day_col, hour_col, minute_col], errors="ignore"
+    )
+
+    df = df.set_index("constructed_datetime").sort_index()
+    return df
+
+
 CONFIG_ERCOT = [
     GridStatusDatasetConfig(
         name="ercot_standardized_hourly",
@@ -315,6 +350,27 @@ CONFIG_WEATHER = [
     ),
 ]
 
+CONFIG_WEATHER_MULTILOC = [
+    GridStatusDatasetConfig(
+        name=loc,
+        transformations=[
+            GridstatusTransformation(
+                function=build_date_from_components,
+            ),
+            GridstatusTransformation(
+                function=reindex_by_datetime,
+                parameters={
+                    "freq": "h",
+                },
+            ),
+            GridstatusTransformation(
+                function=ffill,
+            ),
+        ],
+    )
+    for loc in LOCATION_NAMES
+]
+
 
 def get_inference_and_prediction_intervals(start: dt.datetime, end: dt.datetime):
     """Get inference and prediction intervals for the dataset."""
@@ -392,6 +448,26 @@ def write_splits_with_inference_times(
 
 
 if __name__ == "__main__":
+
+    dfs = apply_all_transformations(CONFIG_WEATHER_MULTILOC)
+    # Add prefix to columns
+    for i, loc in enumerate(["kingston", "ottawa", "montreal"]):
+        dfs[i].columns = [f"{col}_{loc}" for col in dfs[i].columns]
+
+    overall_df = dfs[0]
+    for df in dfs[1:]:
+        overall_df = overall_df.join(df, how="inner")
+
+    overall_path = path_to_file("weather_multiloc_transformed")
+    overall_df.to_csv(overall_path)
+
+    write_splits_with_inference_times(
+        overall_df,
+        train_end_date=WEATHER_MULTILOC_TRAIN_END_DATE,
+        val_end_date=WEATHER_MULTILOC_VAL_END_DATE,
+        file_name_prefix="weather_multiloc",
+    )
+
     dfs = apply_all_transformations(CONFIG_ERCOT)
 
     overall_df = dfs[0]
