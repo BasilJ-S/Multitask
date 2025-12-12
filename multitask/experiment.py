@@ -561,15 +561,17 @@ if __name__ == "__main__":
 
                 all_trial_results.append(results)
                 all_trial_test_results.append(test_results)
-            with open(f"test_results_{preparer.__name__}.json", "w") as file:
+            with open(f"results/test_results_{preparer.__name__}.json", "w") as file:
                 json.dump(
                     all_trial_test_results, file, indent=4
                 )  # 'indent' makes the file human-readable
-            with open(f"training_results_{preparer.__name__}.json", "w") as file:
+            with open(
+                f"results/training_results_{preparer.__name__}.json", "w"
+            ) as file:
                 json.dump(
                     all_trial_results, file, indent=4
                 )  # 'indent' makes the file human-readable
-            with open(f"targets_{preparer.__name__}.json", "w") as file:
+            with open(f"results/targets_{preparer.__name__}.json", "w") as file:
                 json.dump(targets, file, indent=4)
             logger.info(f"Test results: {test_results}")
             logger.info(f"Training results: {results}")

@@ -2,5 +2,7 @@
 *.log
 multitask/data_store/
 multitask/model_store/
+results/
+plots/
 *.DS_Store
 *.db
