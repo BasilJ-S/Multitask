@@ -95,6 +95,7 @@ class LinearPredictor(BaselineModel):
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         val_pred = []
         train_pred = []
+        torch.use_deterministic_algorithms(True)
         logger.info("Running Linear Predictor baseline...")
         for task_idx in range(len(y_train)):
             y_train_task = y_train[task_idx]  # (B, T_f, D_out)
@@ -121,6 +122,7 @@ class LinearPredictor(BaselineModel):
             # Concatenate across forecast horizon
             train_pred.append(pred_train)  # (B, T_f, D_out)
             val_pred.append(pred_val)  # (B, T_f, D_out)
+        torch.use_deterministic_algorithms(False)
 
         return train_pred, val_pred
 
