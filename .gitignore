@@ -1,4 +1,6 @@
 *.pyc
 *.log
 multitask/data_store/
+multitask/model_store/
 *.DS_Store
+*.db

@@ -16,7 +16,9 @@ dependencies = [
     "pytest (>=9.0.1,<10.0.0)",
     "gridstatusio (>=0.15.0,<0.16.0)",
     "keyring (>=25.7.0,<26.0.0)",
-    "xgboost (>=3.1.2,<4.0.0)"
+    "xgboost (>=3.1.2,<4.0.0)",
+    "optuna (>=4.6.0,<5.0.0)",
+    "optuna-dashboard (>=0.20.0,<0.21.0)"
 ]
 
 [tool.poetry]
