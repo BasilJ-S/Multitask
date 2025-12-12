@@ -499,16 +499,16 @@ if __name__ == "__main__":
 
                 lr = best_params["lr"]
                 wd = best_params["weight_decay"]
-                test_loss_unscaled = run_epoch(
+                test_loss = run_epoch(
                     validation_dataloader,
                     model,
                     loss,
                     task_weights=task_weights,
                     optimizer=None,
                     device=device,
-                    reverse_task_scalers=target_scalers,
+                    reverse_task_scalers=None,
                 )
-                test_results[get_model_name(model)] = test_loss_unscaled
+                test_results[get_model_name(model)] = test_loss
                 clean_model = NaiveMultiTaskTimeseriesWrapper(
                     model_cls,
                     input_size=input_size,
