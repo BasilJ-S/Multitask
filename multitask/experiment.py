@@ -165,6 +165,9 @@ def run_baselines(
         train_losses = get_loss_per_task(train_pred, y_train_full, loss_fn)
         val_losses = get_loss_per_task(val_pred, y_validation_full, loss_fn)
 
+        train_losses = [l.item() for l in train_losses]
+        val_losses = [l.item() for l in val_losses]
+
         logger.info(f"{baseline_model.name} train losses per task: {train_losses}")
         logger.info(f"{baseline_model.name} val losses per task: {val_losses}")
 
