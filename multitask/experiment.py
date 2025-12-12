@@ -129,6 +129,7 @@ def run_baselines(
     train_dataset: PreScaledHFDataset | PreScaledTimeseriesDataset,
     validation_dataset: PreScaledHFDataset | PreScaledTimeseriesDataset,
     loss_fn: torch.nn.Module = torch.nn.MSELoss(reduction="none"),
+    seed: int = 42,
 ):
     """
     Run simple baselines: Mean Predictor and Last Value Predictor.
@@ -159,7 +160,7 @@ def run_baselines(
         logger.info(f"Running baseline: {baseline_model.name}...")
 
         train_pred, val_pred = baseline_model.fit_and_predict(
-            X_train_full, y_train_full, X_validation_full, y_validation_full
+            X_train_full, y_train_full, X_validation_full, y_validation_full, seed=seed
         )
 
         train_losses = get_loss_per_task(train_pred, y_train_full, loss_fn)
@@ -430,138 +431,146 @@ if __name__ == "__main__":
 
     if args.eval:
 
-        results = {}
         for preparer in [
             prepare_weather_multiloc_full,
             prepare_ercot_full,
             prepare_weather_full,
             prepare_housing_dataset,
         ]:
-            logger.info(f"Preparing dataset using {preparer.__name__}")
-            (
-                train_dataset,
-                validation_dataset,
-                features,
-                targets,
-                task_weights,
-                target_scalers,
-                input_size,
-                output_sizes,
-                context_length,
-                forecast_horizon,
-            ) = prepare_dataset(preparer, is_train=False)
+            all_trial_results = []
+            all_trial_test_results = []
 
-            # Define study
+            for indipendent_trial in range(5):
+                seed = 42 + indipendent_trial
+                torch.manual_seed(seed)
+                np.random.seed(seed)
 
-            model_list = MODEL_LIST
-
-            loss = torch.nn.MSELoss(reduction="none")  # sum to compute per-task sums
-
-            train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
-            validation_dataloader = DataLoader(validation_dataset, batch_size=128)
-
-            results = run_baselines(train_dataset, validation_dataset)
-            test_results = results.copy()
-            for k, v in results.items():
-                test_results[k] = v["val_loss"]
-            for model_cls, model_objective, param_converter in model_list:
-
-                model_state_dict = torch.load(
-                    os.path.join(
-                        get_save_dir(preparer.__name__, model_cls.__name__),
-                        "best_model.pt",
-                    ),
-                    map_location=device,
-                    weights_only=False,
-                )
-
-                # Use the parameters that were saved with the model to ensure architecture matches
-                best_params = model_state_dict.get("trial_params", {})
-                logger.info(
-                    f"Best params for model {model_cls.__name__} on dataset {preparer.__name__}: {best_params}"
-                )
-                model_params = {
-                    k: v
-                    for k, v in best_params.items()
-                    if k not in ["lr", "weight_decay", "seed"]
-                }
-                model_params = param_converter(**model_params)
-
-                model = NaiveMultiTaskTimeseriesWrapper(
-                    model_cls,
-                    input_size=input_size,
-                    output_sizes=output_sizes,
-                    context_length=context_length,
-                    forecast_horizon=forecast_horizon,
-                    **model_params,
-                ).to(device)
-                model.load_state_dict(model_state_dict["model_state_dict"])
-
-                lr = best_params["lr"]
-                wd = best_params["weight_decay"]
-                test_loss = run_epoch(
-                    validation_dataloader,
-                    model,
-                    loss,
-                    task_weights=task_weights,
-                    optimizer=None,
-                    device=device,
-                    reverse_task_scalers=None,
-                )
-                test_results[get_model_name(model)] = test_loss
-                clean_model = NaiveMultiTaskTimeseriesWrapper(
-                    model_cls,
-                    input_size=input_size,
-                    output_sizes=output_sizes,
-                    context_length=context_length,
-                    forecast_horizon=forecast_horizon,
-                    **model_params,
-                ).to(device)
-                results[get_model_name(model)] = train_and_evaluate(
-                    model,
-                    train_dataloader,
-                    validation_dataloader,
-                    loss,
+                logger.info(f"Preparing dataset using {preparer.__name__}")
+                (
+                    train_dataset,
+                    validation_dataset,
+                    features,
+                    targets,
                     task_weights,
                     target_scalers,
-                    device=device,
-                    lr=lr,
-                    wd=wd,
+                    input_size,
+                    output_sizes,
+                    context_length,
+                    forecast_horizon,
+                ) = prepare_dataset(preparer, is_train=True)
+
+                (
+                    _,
+                    test_dataset,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                ) = prepare_dataset(preparer, is_train=False)
+
+                # Define study
+
+                model_list = MODEL_LIST
+
+                loss = torch.nn.MSELoss(
+                    reduction="none"
+                )  # sum to compute per-task sums
+
+                train_dataloader = DataLoader(
+                    train_dataset, batch_size=256, shuffle=True
                 )
+                validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+
+                results = run_baselines(train_dataset, validation_dataset, seed=seed)
+                test_baseline_results = run_baselines(
+                    train_dataset, test_dataset, seed=seed
+                )
+                test_results = {}
+                for k, v in test_baseline_results.items():
+                    test_results[k] = v["val_loss"]
+
+                for model_cls, model_objective, param_converter in model_list:
+
+                    model_state_dict = torch.load(
+                        os.path.join(
+                            get_save_dir(preparer.__name__, model_cls.__name__),
+                            "best_model.pt",
+                        ),
+                        map_location=device,
+                        weights_only=False,
+                    )
+
+                    # Use the parameters that were saved with the model to ensure architecture matches
+                    best_params = model_state_dict.get("trial_params", {})
+                    logger.info(
+                        f"Best params for model {model_cls.__name__} on dataset {preparer.__name__}: {best_params}"
+                    )
+                    model_params = {
+                        k: v
+                        for k, v in best_params.items()
+                        if k not in ["lr", "weight_decay", "seed"]
+                    }
+                    model_params = param_converter(**model_params)
+
+                    model = NaiveMultiTaskTimeseriesWrapper(
+                        model_cls,
+                        input_size=input_size,
+                        output_sizes=output_sizes,
+                        context_length=context_length,
+                        forecast_horizon=forecast_horizon,
+                        **model_params,
+                    ).to(device)
+                    lr = best_params["lr"]
+                    wd = best_params["weight_decay"]
+
+                    clean_model = NaiveMultiTaskTimeseriesWrapper(
+                        model_cls,
+                        input_size=input_size,
+                        output_sizes=output_sizes,
+                        context_length=context_length,
+                        forecast_horizon=forecast_horizon,
+                        **model_params,
+                    ).to(device)
+                    results[get_model_name(model)] = train_and_evaluate(
+                        model,
+                        train_dataloader,
+                        validation_dataloader,
+                        loss,
+                        task_weights,
+                        target_scalers,
+                        device=device,
+                        lr=lr,
+                        wd=wd,
+                    )
+
+                    test_loss = run_epoch(
+                        validation_dataloader,
+                        model,
+                        loss,
+                        task_weights=task_weights,
+                        optimizer=None,
+                        device=device,
+                        reverse_task_scalers=None,
+                    )
+
+                    test_results[get_model_name(model)] = test_loss
+
+                all_trial_results.append(results)
+                all_trial_test_results.append(test_results)
             with open(f"test_results_{preparer.__name__}.json", "w") as file:
                 json.dump(
-                    test_results, file, indent=4
+                    all_trial_test_results, file, indent=4
                 )  # 'indent' makes the file human-readable
             with open(f"training_results_{preparer.__name__}.json", "w") as file:
                 json.dump(
-                    results, file, indent=4
+                    all_trial_results, file, indent=4
                 )  # 'indent' makes the file human-readable
             with open(f"targets_{preparer.__name__}.json", "w") as file:
                 json.dump(targets, file, indent=4)
             logger.info(f"Test results: {test_results}")
             logger.info(f"Training results: {results}")
             logger.info(f"Targets: {targets}")
-
-            # ---- PLOT RESULTS ----
-            plot_task_loss_separately(results, targets)
-            fig, axs = plt.subplots(1, 2, figsize=(28, 12))
-
-            plot_task_loss_same_plot(results, targets, axs, 0)
-            plot_loss(results, axs, 1)
-            plot_test_loss(test_results, targets)
-
-            # Add labels describing each task for whole figure
-            fig.suptitle(
-                f"Multi-Task MLP Model Comparison on {preparer.__name__}", fontsize=16
-            )
-            task_text = [f"Task {i}: Predict {targets[i]}" for i in range(len(targets))]
-            fig.text(
-                0.5,
-                0.04,
-                ", ".join(task_text),
-                ha="center",
-                fontsize=10,
-            )
-
-            plt.savefig("multitask_mlp_comparison.png")
-            plt.show()

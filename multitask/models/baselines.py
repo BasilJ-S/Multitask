@@ -14,6 +14,7 @@ class BaselineModel(ABC):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         pass
 
@@ -39,6 +40,7 @@ class GlobalMeanBaseline(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,  # not used
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         logger.info("Running Global Mean Predictor baseline...")
         val_pred: list[torch.Tensor] = []
@@ -89,6 +91,7 @@ class LinearPredictor(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,  # not used
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         val_pred = []
         train_pred = []
@@ -138,6 +141,7 @@ class XGBoostPredictor(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         val_pred = []
         train_pred = []
@@ -155,6 +159,7 @@ class XGBoostPredictor(BaselineModel):
                 colsample_bytree=0.5,
                 gamma=1,
                 eta=0.1,
+                seed=seed,
             )
             model.fit(
                 X_train.reshape(X_train.shape[0], -1).numpy(),
@@ -183,7 +188,6 @@ class XGBoostPredictor(BaselineModel):
 ALL_BASELINES: list[BaselineModel] = [
     GlobalMeanBaseline(),
     LinearPredictor(),
-    XGBoostPredictor(),
 ]
 
 BASELINE_NAMES = [model.name for model in ALL_BASELINES]
