@@ -130,8 +130,24 @@ class LinearPredictor(BaselineModel):
 class XGBoostPredictor(BaselineModel):
     """XGBoost predictor for multitask learning. Trains a separate XGBoost model for each task."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        n_estimators: int = 10,
+        max_depth: int = 3,
+        subsample: float = 0.5,
+        colsample_bytree: float = 0.5,
+        gamma: float = 1,
+        eta: float = 0.1,
+        seed: int = 42,
+    ) -> None:
         super().__init__()
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.gamma = gamma
+        self.eta = eta
+        self.seed = seed
 
     @property
     def name(self) -> str:
@@ -155,17 +171,27 @@ class XGBoostPredictor(BaselineModel):
 
             model = xgb.XGBRegressor(
                 objective="reg:squarederror",
-                n_estimators=10,
-                max_depth=3,
-                subsample=0.5,
-                colsample_bytree=0.5,
-                gamma=1,
-                eta=0.1,
-                seed=seed,
+                n_estimators=self.n_estimators,
+                max_depth=self.max_depth,
+                subsample=self.subsample,
+                colsample_bytree=self.colsample_bytree,
+                gamma=self.gamma,
+                eta=self.eta,
+                seed=self.seed,
+                early_stopping_rounds=10,
+                n_jobs=-1,
+                tree_method="hist",
             )
             model.fit(
                 X_train.reshape(X_train.shape[0], -1).numpy(),
                 task_y_train.numpy(),
+                eval_set=[
+                    (
+                        X_eval.reshape(X_eval.shape[0], -1).numpy(),
+                        y_eval[task_idx].reshape(y_eval[task_idx].shape[0], -1).numpy(),
+                    )
+                ],
+                verbose=False,
             )
 
             train_pred_task = model.predict(
@@ -190,6 +216,7 @@ class XGBoostPredictor(BaselineModel):
 ALL_BASELINES: list[BaselineModel] = [
     GlobalMeanBaseline(),
     LinearPredictor(),
+    XGBoostPredictor(),
 ]
 
 BASELINE_NAMES = [model.name for model in ALL_BASELINES]
