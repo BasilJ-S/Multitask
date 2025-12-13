@@ -586,6 +586,7 @@ if __name__ == "__main__":
                     train_dataset, batch_size=256, shuffle=True
                 )
                 validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+                test_dataloader = DataLoader(test_dataset, batch_size=128)
 
                 results = run_baselines(
                     train_dataset,
@@ -631,14 +632,6 @@ if __name__ == "__main__":
                     lr = best_params["lr"]
                     wd = best_params["weight_decay"]
 
-                    clean_model = NaiveMultiTaskTimeseriesWrapper(
-                        model_cls,
-                        input_size=input_size,
-                        output_sizes=output_sizes,
-                        context_length=context_length,
-                        forecast_horizon=forecast_horizon,
-                        **model_params,
-                    ).to(device)
                     results[get_model_name(model)] = train_and_evaluate(
                         model,
                         train_dataloader,
@@ -652,7 +645,7 @@ if __name__ == "__main__":
                     )
 
                     test_loss = run_epoch(
-                        validation_dataloader,
+                        test_dataloader,
                         model,
                         loss,
                         task_weights=task_weights,
