@@ -2,7 +2,6 @@ import argparse
 import json
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
 import optuna
 import torch
@@ -22,16 +21,15 @@ from multitask.data_provider.multi_datasets import (
     PreScaledHFDataset,
     PreScaledTimeseriesDataset,
 )
-from multitask.models.baselines import ALL_BASELINES
+from multitask.models.baselines import (
+    ALL_BASELINES,
+    GlobalMeanBaseline,
+    LinearPredictor,
+    XGBoostPredictor,
+)
 from multitask.models.model_trials import MODEL_LIST
 from multitask.models.models import NaiveMultiTaskTimeseriesWrapper
 from multitask.utils.logger import logger
-from multitask.utils.plotter import (
-    plot_loss,
-    plot_task_loss_same_plot,
-    plot_task_loss_separately,
-    plot_test_loss,
-)
 
 
 def extract_batch(batch, device):
@@ -130,6 +128,7 @@ def run_baselines(
     validation_dataset: PreScaledHFDataset | PreScaledTimeseriesDataset,
     loss_fn: torch.nn.Module = torch.nn.MSELoss(reduction="none"),
     seed: int = 42,
+    baseline_models: list = ALL_BASELINES,
 ):
     """
     Run simple baselines: Mean Predictor and Last Value Predictor.
@@ -156,7 +155,7 @@ def run_baselines(
     baseline_results = {}
 
     # Global Mean Predictor
-    for baseline_model in ALL_BASELINES:
+    for baseline_model in baseline_models:
         logger.info(f"Running baseline: {baseline_model.name}...")
 
         train_pred, val_pred = baseline_model.fit_and_predict(
@@ -212,7 +211,7 @@ def train_and_evaluate(
     lr: float = 0.001,
     wd: float = 0.0,
 ) -> list[dict]:
-    patience = 5
+    patience = 10
     epochs_no_improve = 0
     best_val_loss = float("inf")
     results = []
@@ -220,7 +219,7 @@ def train_and_evaluate(
         f"Training model: {get_model_name(model)} with {sum(p.numel() for p in model.parameters())} parameters"
     )
     optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=wd)
-    t = trange(150, unit="epoch")
+    t = trange(200, unit="epoch")
     for _epoch in t:
         train_loss = run_epoch(
             train_dataloader,
@@ -287,6 +286,11 @@ def train_and_evaluate(
 def objective_builder(
     model_objective,
     model_class,
+    train_dataloader: DataLoader,
+    validation_dataloader: DataLoader,
+    loss: torch.nn.Module,
+    task_weights: list[float],
+    target_scalers: list[StandardScaler],
     input_size: int,
     output_sizes: list[int],
     context_length: int,
@@ -362,6 +366,56 @@ def get_save_dir(preparer_name: str, model_name: str) -> str:
     return f"multitask/model_store/{preparer_name}/{model_name}"
 
 
+def xgb_objective_builder(
+    train_dataset: PreScaledHFDataset | PreScaledTimeseriesDataset,
+    validation_dataset: PreScaledHFDataset | PreScaledTimeseriesDataset,
+    loss: torch.nn.Module,
+    seed=42,
+):
+
+    def objective(trial):
+        current_seed = seed + trial.number
+        torch.manual_seed(current_seed)
+        np.random.seed(current_seed)
+        n_estimators = trial.suggest_int("n_estimators", 10, 50)
+        max_depth = trial.suggest_int("max_depth", 2, 10)
+        subsample = trial.suggest_float("subsample", 0.1, 1.0)
+        colsample_bytree = trial.suggest_float("colsample_bytree", 0.1, 1.0)
+        gamma = trial.suggest_float("gamma", 0, 5)
+        eta = trial.suggest_float("eta", 0.01, 0.3)
+        model = XGBoostPredictor(
+            n_estimators=n_estimators,
+            max_depth=max_depth,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            gamma=gamma,
+            eta=eta,
+            seed=current_seed,
+        )
+
+        # Here you would add code to train the model and evaluate it
+        # For simplicity, let's assume we return a dummy validation loss
+        results = run_baselines(
+            train_dataset,
+            validation_dataset,
+            loss,
+            seed=current_seed,
+            baseline_models=[model],
+        )
+        val_loss = results[model.name]["val_loss"]
+        train_loss = results[model.name]["train_loss"]
+        trial.set_user_attr("per_task_val_loss", val_loss)
+        trial.set_user_attr("per_task_train_loss", train_loss)
+        val_loss = np.mean(val_loss)
+        train_loss = np.mean(train_loss)
+        trial.set_user_attr("train_loss", train_loss)
+        trial.set_user_attr("val_loss", val_loss)
+
+        return val_loss
+
+    return objective
+
+
 if __name__ == "__main__":
 
     args = argparse.ArgumentParser(description="Multi-Task Learning Experiment")
@@ -377,6 +431,7 @@ if __name__ == "__main__":
         exit(1)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.study:
+        num_trials = 20
         # ---- LOAD DATASET ----
         for preparer in [
             prepare_weather_multiloc_full,
@@ -406,8 +461,23 @@ if __name__ == "__main__":
 
             train_dataloader = DataLoader(train_dataset, batch_size=256, shuffle=True)
             validation_dataloader = DataLoader(validation_dataset, batch_size=128)
+            xgb_study = optuna.create_study(
+                direction="minimize",
+                study_name=f"{preparer.__name__}_xgb_study",
+                storage="sqlite:///multitask_model_comparison.db",
+                load_if_exists=True,
+            )
 
-            results = {}  # run_baselines(train_dataset, validation_dataset)
+            xgb_objective = xgb_objective_builder(
+                train_dataset=train_dataset,
+                validation_dataset=validation_dataset,
+                loss=loss,
+                seed=42,
+            )
+            xgb_study.optimize(
+                xgb_objective, n_trials=num_trials, show_progress_bar=True
+            )
+
             for model_cls, model_objective, _ in model_list:
                 study = optuna.create_study(
                     direction="minimize",
@@ -420,6 +490,11 @@ if __name__ == "__main__":
                 objective = objective_builder(
                     model_objective,
                     model_cls,
+                    train_dataloader,
+                    validation_dataloader,
+                    loss,
+                    task_weights,
+                    target_scalers,
                     input_size,
                     output_sizes,
                     context_length,
@@ -427,9 +502,10 @@ if __name__ == "__main__":
                     device=device,
                     save_dir=save_dir,
                 )
-                study.optimize(objective, n_trials=20)
+                study.optimize(objective, n_trials=num_trials, show_progress_bar=True)
 
     if args.eval:
+        num_independent_trials = 5
 
         for preparer in [
             prepare_weather_multiloc_full,
@@ -440,7 +516,12 @@ if __name__ == "__main__":
             all_trial_results = []
             all_trial_test_results = []
 
-            for indipendent_trial in range(5):
+            t = trange(
+                num_independent_trials,
+                unit=f"independent_trials of {preparer.__name__}",
+            )
+
+            for indipendent_trial in t:
                 seed = 42 + indipendent_trial
                 torch.manual_seed(seed)
                 np.random.seed(seed)
@@ -476,6 +557,27 @@ if __name__ == "__main__":
 
                 model_list = MODEL_LIST
 
+                xgb_study = optuna.create_study(
+                    direction="minimize",
+                    study_name=f"{preparer.__name__}_xgb_study",
+                    storage="sqlite:///multitask_model_comparison.db",
+                    load_if_exists=True,
+                )
+                xgb_best_params = xgb_study.best_trial.params
+                baselines = [
+                    XGBoostPredictor(
+                        n_estimators=xgb_best_params["n_estimators"],
+                        max_depth=xgb_best_params["max_depth"],
+                        subsample=xgb_best_params["subsample"],
+                        colsample_bytree=xgb_best_params["colsample_bytree"],
+                        gamma=xgb_best_params["gamma"],
+                        eta=xgb_best_params["eta"],
+                        seed=seed,
+                    ),
+                    LinearPredictor(),
+                    GlobalMeanBaseline(),
+                ]
+
                 loss = torch.nn.MSELoss(
                     reduction="none"
                 )  # sum to compute per-task sums
@@ -485,9 +587,14 @@ if __name__ == "__main__":
                 )
                 validation_dataloader = DataLoader(validation_dataset, batch_size=128)
 
-                results = run_baselines(train_dataset, validation_dataset, seed=seed)
+                results = run_baselines(
+                    train_dataset,
+                    validation_dataset,
+                    seed=seed,
+                    baseline_models=baselines,
+                )
                 test_baseline_results = run_baselines(
-                    train_dataset, test_dataset, seed=seed
+                    train_dataset, test_dataset, seed=seed, baseline_models=baselines
                 )
                 test_results = {}
                 for k, v in test_baseline_results.items():
@@ -558,6 +665,12 @@ if __name__ == "__main__":
 
                 all_trial_results.append(results)
                 all_trial_test_results.append(test_results)
+                t.set_description(
+                    f"Completed trial {indipendent_trial+1}/5 for dataset {preparer.__name__}"
+                )
+                t.write(
+                    f"Completed trial {indipendent_trial+1}/5 for dataset {preparer.__name__}"
+                )
             with open(f"results/test_results_{preparer.__name__}.json", "w") as file:
                 json.dump(
                     all_trial_test_results, file, indent=4
