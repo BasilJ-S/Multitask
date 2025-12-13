@@ -20,7 +20,7 @@ def num_layers_to_layers_list(num_layers: int, hidden_dim: int) -> list[int]:
 def naive_mlp_params(trial: optuna.trial.Trial) -> dict[str, list[int]]:
     # Optimize number of layers and hidden size
     num_layers = trial.suggest_int("num_layers", 1, 5)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
     return naive_mlp_optuna_params_to_model_params(num_layers, hidden_dim)
 
 
@@ -34,7 +34,7 @@ def hard_share_params(trial: optuna.trial.Trial) -> dict[str, list[int]]:
     # Shared layers and task-specific layers
     num_shared = trial.suggest_int("num_shared_layers", 1, 5)
     num_task = trial.suggest_int("num_task_layers", 1, 5)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
     return hard_share_optuna_params_to_model_params(num_shared, num_task, hidden_dim)
 
 
@@ -49,8 +49,8 @@ def hard_share_optuna_params_to_model_params(
 
 def tucker_soft_params(trial: optuna.trial.Trial) -> dict[str, list[int] | int]:
     num_layers = trial.suggest_int("num_layers", 1, 5)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
-    tucker_rank = trial.suggest_int("tucker_rank", 2, 32)
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
+    tucker_rank = trial.suggest_int("tucker_rank", 2, 64)
     return tucker_soft_share_optuna_params_to_model_params(
         num_layers, hidden_dim, tucker_rank
     )
@@ -67,8 +67,8 @@ def tucker_soft_share_optuna_params_to_model_params(
 
 def tt_soft_params(trial: optuna.trial.Trial) -> dict[str, list[int] | int]:
     num_layers = trial.suggest_int("num_layers", 1, 5)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
-    tt_rank = trial.suggest_int("tt_rank", 2, 32)
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
+    tt_rank = trial.suggest_int("tt_rank", 2, 64)
     return tt_soft_share_optuna_params_to_model_params(num_layers, hidden_dim, tt_rank)
 
 
@@ -83,8 +83,8 @@ def tt_soft_share_optuna_params_to_model_params(
 
 def residual_network_params(trial: optuna.trial.Trial) -> dict[str, list[int]]:
     num_shared = trial.suggest_int("num_shared_layers", 1, 5)
-    num_task = trial.suggest_int("num_task_layers", 1, 2)
-    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    num_task = trial.suggest_int("num_task_layers", 1, 5)
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
     return residual_network_optuna_params_to_model_params(
         num_shared, num_task, hidden_dim
     )

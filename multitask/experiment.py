@@ -211,7 +211,7 @@ def train_and_evaluate(
     lr: float = 0.001,
     wd: float = 0.0,
 ) -> list[dict]:
-    patience = 5
+    patience = 10
     epochs_no_improve = 0
     best_val_loss = float("inf")
     results = []
@@ -377,8 +377,8 @@ def xgb_objective_builder(
         current_seed = seed + trial.number
         torch.manual_seed(current_seed)
         np.random.seed(current_seed)
-        n_estimators = trial.suggest_int("n_estimators", 1, 2)
-        max_depth = trial.suggest_int("max_depth", 3, 4)
+        n_estimators = trial.suggest_int("n_estimators", 10, 50)
+        max_depth = trial.suggest_int("max_depth", 2, 10)
         subsample = trial.suggest_float("subsample", 0.1, 1.0)
         colsample_bytree = trial.suggest_float("colsample_bytree", 0.1, 1.0)
         gamma = trial.suggest_float("gamma", 0, 5)
@@ -474,7 +474,9 @@ if __name__ == "__main__":
                 loss=loss,
                 seed=42,
             )
-            xgb_study.optimize(xgb_objective, n_trials=num_trials)
+            xgb_study.optimize(
+                xgb_objective, n_trials=num_trials, show_progress_bar=True
+            )
 
             for model_cls, model_objective, _ in model_list:
                 study = optuna.create_study(
@@ -500,9 +502,10 @@ if __name__ == "__main__":
                     device=device,
                     save_dir=save_dir,
                 )
-                study.optimize(objective, n_trials=num_trials)
+                study.optimize(objective, n_trials=num_trials, show_progress_bar=True)
 
     if args.eval:
+        num_independent_trials = 5
 
         for preparer in [
             prepare_weather_multiloc_full,
@@ -513,7 +516,10 @@ if __name__ == "__main__":
             all_trial_results = []
             all_trial_test_results = []
 
-            t = trange(5, unit="independent_trial")
+            t = trange(
+                num_independent_trials,
+                unit=f"independent_trials of {preparer.__name__}",
+            )
 
             for indipendent_trial in t:
                 seed = 42 + indipendent_trial
