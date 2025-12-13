@@ -9,6 +9,7 @@ from multitask.models.models import (
     MultiTaskNaiveMLP,
     MultiTaskResidualNetwork,
     MultiTaskTTSoftShareMLP,
+    MultiTaskTuckerSoftShareMLP,
 )
 
 
@@ -43,6 +44,24 @@ def hard_share_optuna_params_to_model_params(
     return {
         "shared_hidden_sizes": num_layers_to_layers_list(num_shared_layers, hidden_dim),
         "task_hidden_sizes": num_layers_to_layers_list(num_task_layers, hidden_dim),
+    }
+
+
+def tucker_soft_params(trial: optuna.trial.Trial) -> dict[str, list[int] | int]:
+    num_layers = trial.suggest_int("num_layers", 1, 5)
+    hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+    tucker_rank = trial.suggest_int("tucker_rank", 2, 32)
+    return tucker_soft_share_optuna_params_to_model_params(
+        num_layers, hidden_dim, tucker_rank
+    )
+
+
+def tucker_soft_share_optuna_params_to_model_params(
+    num_layers: int, hidden_dim: int, tucker_rank: int
+) -> dict[str, list[int] | int]:
+    return {
+        "hidden_sizes": num_layers_to_layers_list(num_layers, hidden_dim),
+        "tucker_rank": tucker_rank,
     }
 
 
@@ -81,6 +100,11 @@ def residual_network_optuna_params_to_model_params(
 
 
 MODEL_LIST: list[tuple[type, Any, Any]] = [
+    (
+        MultiTaskTuckerSoftShareMLP,
+        tucker_soft_params,
+        tucker_soft_share_optuna_params_to_model_params,
+    ),
     (
         MultiTaskResidualNetwork,
         residual_network_params,

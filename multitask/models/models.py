@@ -287,6 +287,135 @@ class MultiTaskTTSoftShareMLP(torch.nn.Module):
         return out
 
 
+class MultiTaskTuckerSoftShareLinear(torch.nn.Module):
+    """
+    Shared Tucker layer for multi-task learning. Weights are represented in Tucker decomposition.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        num_tasks: int,
+        tucker_rank: int,
+    ) -> None:
+        super().__init__()
+
+        self.num_tasks = num_tasks
+        self.in_features = in_features
+        self.out_features = out_features
+        self.tucker_rank = tucker_rank
+
+        # Scaling factor for initialization to keep variance small
+        self.variance_scale = 0.1
+
+        self.tensor_core = torch.nn.Parameter(
+            torch.randn(self.tucker_rank, self.tucker_rank, self.tucker_rank)
+            * self.variance_scale
+        )
+
+        self.task_core = torch.nn.Parameter(
+            torch.randn(self.num_tasks, self.tucker_rank) * self.variance_scale
+        )
+
+        self.in_core = torch.nn.Parameter(
+            torch.randn(self.in_features, self.tucker_rank) * self.variance_scale
+        )
+
+        self.out_core = torch.nn.Parameter(
+            torch.randn(self.out_features, self.tucker_rank) * self.variance_scale
+        )
+
+    def _get_contracted_cores(self):
+        W = torch.einsum(
+            "ij,jkl->ikl", self.task_core, self.tensor_core
+        )  # (num_tasks, tucker_rank, tucker_rank)
+        W = torch.einsum(
+            "ij,ljk->lik", self.in_core, W
+        )  # (num_tasks, in_features, tucker_rank)
+        return torch.einsum(
+            "ij,klj->kli", self.out_core, W
+        )  # (num_tasks, in_features, out_features)
+
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> list[
+        torch.Tensor
+    ]:  # list of (batch_size, input_size) -> list of (batch_size, output_size)
+        x_concat = torch.stack(x, dim=1)  # (batch_size, num_tasks, input_size)
+        task_weights = (
+            self._get_contracted_cores()
+        )  # (num_tasks, in_features, out_features)
+
+        y = torch.einsum(
+            "bni,nio->bno", x_concat, task_weights
+        )  # (batch_size, num_tasks, output_size)
+        y = [
+            y[:, i, :] for i in range(self.num_tasks)
+        ]  # list of (batch_size, output_size)
+        return y
+
+
+class MultiTaskTuckerSoftShareMLP(torch.nn.Module):
+    """
+    Multi-task MLP with TT-soft sharing layers.
+    Only one task specific layer to project to output size of each task.
+    All other layers are shared using TT-soft sharing.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_sizes: list[int],
+        output_sizes: list[int],
+        tucker_rank=4,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_sizes = hidden_sizes
+        self.output_sizes = output_sizes
+        self.num_tasks = len(output_sizes)
+
+        self.in_layer = MultiTaskTuckerSoftShareLinear(
+            in_features=self.input_size,
+            out_features=self.hidden_sizes[0],
+            tucker_rank=tucker_rank,
+            num_tasks=self.num_tasks,
+        )
+
+        shared_hidden_layers = []
+
+        for layer in range(1, len(self.hidden_sizes)):
+            shared_hidden_layers.append(
+                MultiTaskTuckerSoftShareLinear(
+                    in_features=self.hidden_sizes[layer - 1],
+                    out_features=self.hidden_sizes[layer],
+                    tucker_rank=tucker_rank,
+                    num_tasks=self.num_tasks,
+                )
+            )
+        self.shared_hidden_layers = torch.nn.ModuleList(shared_hidden_layers)
+
+        self.task_layers = torch.nn.ModuleList(
+            [
+                torch.nn.Linear(self.hidden_sizes[-1], output_size)
+                for output_size in self.output_sizes
+            ]
+        )
+        self.activation = torch.nn.ReLU()
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        x_list = [x for _ in range(self.num_tasks)]
+        x_list = self.in_layer(x_list)
+        x_list = [self.activation(x_i) for x_i in x_list]
+
+        for layer in self.shared_hidden_layers:
+            x_list = layer(x_list)
+            x_list = [self.activation(x_i) for x_i in x_list]
+        out = [layer(x_i) for x_i, layer in zip(x_list, self.task_layers)]
+        return out
+
+
 class MultiTaskResidualNetwork(torch.nn.Module):
     """
     Multi-task network with residual shared layers and task-specific MLPs.
