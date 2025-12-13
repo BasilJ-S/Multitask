@@ -495,17 +495,14 @@ if __name__ == "__main__":
 
                 for model_cls, model_objective, param_converter in model_list:
 
-                    model_state_dict = torch.load(
-                        os.path.join(
-                            get_save_dir(preparer.__name__, model_cls.__name__),
-                            "best_model.pt",
-                        ),
-                        map_location=device,
-                        weights_only=False,
+                    study = optuna.create_study(
+                        direction="minimize",
+                        study_name=f"{preparer.__name__}_{model_cls.__name__}_study",
+                        storage="sqlite:///multitask_model_comparison.db",
+                        load_if_exists=True,
                     )
 
-                    # Use the parameters that were saved with the model to ensure architecture matches
-                    best_params = model_state_dict.get("trial_params", {})
+                    best_params = study.best_trial.params
                     logger.info(
                         f"Best params for model {model_cls.__name__} on dataset {preparer.__name__}: {best_params}"
                     )
