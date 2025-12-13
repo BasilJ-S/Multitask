@@ -14,6 +14,7 @@ class BaselineModel(ABC):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         pass
 
@@ -39,6 +40,7 @@ class GlobalMeanBaseline(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,  # not used
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         logger.info("Running Global Mean Predictor baseline...")
         val_pred: list[torch.Tensor] = []
@@ -89,9 +91,11 @@ class LinearPredictor(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,  # not used
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         val_pred = []
         train_pred = []
+        torch.use_deterministic_algorithms(True)
         logger.info("Running Linear Predictor baseline...")
         for task_idx in range(len(y_train)):
             y_train_task = y_train[task_idx]  # (B, T_f, D_out)
@@ -118,6 +122,7 @@ class LinearPredictor(BaselineModel):
             # Concatenate across forecast horizon
             train_pred.append(pred_train)  # (B, T_f, D_out)
             val_pred.append(pred_val)  # (B, T_f, D_out)
+        torch.use_deterministic_algorithms(False)
 
         return train_pred, val_pred
 
@@ -138,6 +143,7 @@ class XGBoostPredictor(BaselineModel):
         y_train: list[torch.Tensor],
         X_eval: torch.Tensor,
         y_eval: list[torch.Tensor],
+        seed: int = 42,
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
         val_pred = []
         train_pred = []
@@ -155,6 +161,7 @@ class XGBoostPredictor(BaselineModel):
                 colsample_bytree=0.5,
                 gamma=1,
                 eta=0.1,
+                seed=seed,
             )
             model.fit(
                 X_train.reshape(X_train.shape[0], -1).numpy(),
@@ -183,7 +190,6 @@ class XGBoostPredictor(BaselineModel):
 ALL_BASELINES: list[BaselineModel] = [
     GlobalMeanBaseline(),
     LinearPredictor(),
-    XGBoostPredictor(),
 ]
 
 BASELINE_NAMES = [model.name for model in ALL_BASELINES]
