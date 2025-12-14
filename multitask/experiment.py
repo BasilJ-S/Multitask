@@ -559,7 +559,7 @@ if __name__ == "__main__":
                 study.optimize(objective, n_trials=num_trials, show_progress_bar=True)
 
     if args.eval:
-        num_independent_trials = 5
+        num_independent_trials = 1
 
         for preparer in [
             prepare_weather_multiloc_full,
