@@ -158,10 +158,12 @@ def run_baselines(
     loss_fn: torch.nn.Module = torch.nn.MSELoss(reduction="none"),
     seed: int = 42,
     baseline_models: list = ALL_BASELINES,
+    i_want_ground_truth_for_interpretability: bool = False,
 ):
     """
     Run simple baselines: Mean Predictor and Last Value Predictor.
     Returns a dictionary with baseline names as keys and their validation losses as values.
+    If i_want_ground_truth_for_interpretability=True, returns detailed metrics (MAE, MSE, RMSE, predictions, targets).
     """
 
     full_dataset_dataloader = DataLoader(train_dataset, batch_size=len(train_dataset))
@@ -200,11 +202,34 @@ def run_baselines(
         logger.info(f"{baseline_model.name} train losses per task: {train_losses}")
         logger.info(f"{baseline_model.name} val losses per task: {val_losses}")
 
-        baseline_results[baseline_model.name] = {
-            "epoch": "all",
-            "train_loss": train_losses,
-            "val_loss": val_losses,
-        }
+        if i_want_ground_truth_for_interpretability:
+            # Compute detailed metrics per task
+            metrics_per_task = {}
+            num_tasks = len(val_pred)
+
+            for task_idx in range(num_tasks):
+                preds = val_pred[task_idx].detach().cpu().numpy().flatten()
+                targets = y_validation_full[task_idx].detach().cpu().numpy().flatten()
+
+                mse = np.mean((preds - targets) ** 2)
+                mae = np.mean(np.abs(preds - targets))
+                rmse = np.sqrt(mse)
+
+                metrics_per_task[f"task_{task_idx}"] = {
+                    "mse": float(mse),
+                    "mae": float(mae),
+                    "rmse": float(rmse),
+                    "predictions": preds.tolist(),
+                    "targets": targets.tolist(),
+                }
+
+            baseline_results[baseline_model.name] = metrics_per_task
+        else:
+            baseline_results[baseline_model.name] = {
+                "epoch": "all",
+                "train_loss": train_losses,
+                "val_loss": val_losses,
+            }
 
     return baseline_results
 
@@ -624,11 +649,15 @@ if __name__ == "__main__":
                     baseline_models=baselines,
                 )
                 test_baseline_results = run_baselines(
-                    train_dataset, test_dataset, seed=seed, baseline_models=baselines
+                    train_dataset,
+                    test_dataset,
+                    seed=seed,
+                    baseline_models=baselines,
+                    i_want_ground_truth_for_interpretability=True,
                 )
                 test_results = {}
                 for k, v in test_baseline_results.items():
-                    test_results[k] = v["val_loss"]
+                    test_results[k] = v
 
                 for model_cls, model_objective, param_converter in model_list:
 
