@@ -735,6 +735,3 @@ if __name__ == "__main__":
                 )  # 'indent' makes the file human-readable
             with open(f"results/targets_{preparer.__name__}.json", "w") as file:
                 json.dump(targets, file, indent=4)
-            logger.info(f"Test results: {test_results}")
-            logger.info(f"Training results: {results}")
-            logger.info(f"Targets: {targets}")
