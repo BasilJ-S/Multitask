@@ -103,12 +103,35 @@ if __name__ == "__main__":
         cmap = plt.get_cmap("tab10")
         model_colors = {m: cmap(i) for i, m in enumerate(model_names)}
 
+        # Check if we have new format with detailed metrics
+        first_model_result = test_results[0][model_names[0]]
+        is_new_format = (
+            isinstance(first_model_result, dict) and "task_0" in first_model_result
+        )
+
         # Convert to ndarray: shape (num_models, num_tasks, num_trials)
-        test_losses = {
-            model: np.array([trial[model] for trial in test_results]).T
-            # shape now: (num_tasks, num_trials)
-            for model in model_names
-        }
+        if is_new_format:
+            # Extract MSE from new format for backward compatibility
+            num_tasks_detected = len(
+                [k for k in first_model_result.keys() if k.startswith("task_")]
+            )
+            test_losses = {}
+            for model in model_names:
+                model_data = []
+                for trial in test_results:
+                    trial_losses = [
+                        trial[model][f"task_{i}"]["mse"]
+                        for i in range(num_tasks_detected)
+                    ]
+                    model_data.append(trial_losses)
+                test_losses[model] = np.array(model_data).T  # (num_tasks, num_trials)
+        else:
+            # Old format
+            test_losses = {
+                model: np.array([trial[model] for trial in test_results]).T
+                # shape now: (num_tasks, num_trials)
+                for model in model_names
+            }
 
         from pathlib import Path
 
@@ -120,23 +143,50 @@ if __name__ == "__main__":
         ):
             """
             test_results: list of dicts
-                Each dict maps model -> list per task
+                Each dict maps model -> list per task OR dict with metrics
             task_names: optional list of task names
             file_suffix: str for saving figure
             """
 
             model_names = list(test_results[0].keys())
             num_models = len(model_names)
-            num_tasks = len(test_results[0][model_names[0]])
+
+            # Check if we have old format (list) or new format (dict with metrics)
+            first_model_result = test_results[0][model_names[0]]
+            is_new_format = (
+                isinstance(first_model_result, dict) and "task_0" in first_model_result
+            )
+
+            if is_new_format:
+                # New format: dict with task_0, task_1, etc.
+                num_tasks = len(
+                    [k for k in first_model_result.keys() if k.startswith("task_")]
+                )
+            else:
+                # Old format: list of losses
+                num_tasks = len(first_model_result)
 
             if task_names is None:
                 task_names = [f"Task {i+1}" for i in range(num_tasks)]
 
             # Collect data: shape (num_models, num_tasks, num_trials)
-            data = {
-                model: np.array([trial[model] for trial in test_results]).T
-                for model in model_names
-            }  # (num_tasks, num_trials)
+            if is_new_format:
+                # Extract MSE from the new format
+                data = {}
+                for model in model_names:
+                    model_data = []
+                    for trial in test_results:
+                        trial_losses = [
+                            trial[model][f"task_{i}"]["mse"] for i in range(num_tasks)
+                        ]
+                        model_data.append(trial_losses)
+                    data[model] = np.array(model_data).T  # (num_tasks, num_trials)
+            else:
+                # Old format
+                data = {
+                    model: np.array([trial[model] for trial in test_results]).T
+                    for model in model_names
+                }  # (num_tasks, num_trials)
 
             # Define colors per model
             cmap = plt.get_cmap("tab10")
@@ -181,9 +231,45 @@ if __name__ == "__main__":
         plot_test_results_with_errorbars(test_results, task_names, file_suffix)
 
         # ---------------------------------------------------------
+        # NEW VISUALIZATIONS: Violin plots and metrics comparison
+        # ---------------------------------------------------------
+        if is_new_format:
+            print("\n=== Generating Enhanced Visualizations ===\n")
+
+            # Aggregate metrics across trials for first trial (or you can average)
+            # For violin plots, we use the first trial's detailed data
+            first_trial_results = test_results[0]
+
+            try:
+                plot_prediction_errors_violin(
+                    first_trial_results,
+                    task_names=task_names,
+                    file_suffix=file_suffix,
+                    show=args_parsed.show,
+                )
+                print(
+                    f"✓ Generated violin plots: plots/prediction_errors_violin_{file_suffix}.png"
+                )
+            except Exception as e:
+                print(f"⚠ Could not generate violin plots: {e}")
+
+            try:
+                plot_prediction_metrics_comparison(
+                    first_trial_results,
+                    task_names=task_names,
+                    file_suffix=file_suffix,
+                    show=args_parsed.show,
+                )
+                print(
+                    f"✓ Generated metrics comparison: plots/metrics_comparison_{file_suffix}.png"
+                )
+            except Exception as e:
+                print(f"⚠ Could not generate metrics comparison: {e}")
+
+        # ---------------------------------------------------------
         # STATISTICAL SUMMARY: mean/std per model per task
         # ---------------------------------------------------------
-        print("\n=== STATISTICAL SUMMARY (Test Loss) ===\n")
+        print("\n=== STATISTICAL SUMMARY (Test Loss - MSE) ===\n")
         for i, model in enumerate(model_names):
             print(f"\nModel: {model_names_readable[i]}")
             arr = test_losses[model]  # shape (num_tasks, num_trials)
@@ -191,6 +277,17 @@ if __name__ == "__main__":
                 mean = arr[t].mean()
                 std = arr[t].std()
                 print(f"  {task_names[t]:15s}  mean={mean:.4f}  std={std:.4f}")
+
+        # Additional detailed metrics if available
+        if is_new_format:
+            print("\n=== DETAILED METRICS (First Trial) ===\n")
+            for i, model in enumerate(model_names):
+                print(f"\nModel: {model_names_readable[i]}")
+                for t in range(num_tasks):
+                    task_data = test_results[0][model][f"task_{t}"]
+                    print(
+                        f"  {task_names[t]:15s}  MAE={task_data['mae']:.4f}  MSE={task_data['mse']:.4f}  RMSE={task_data['rmse']:.4f}"
+                    )
 
         # ---------------------------------------------------------
         # TRAINING LOSS CURVES (per-task)

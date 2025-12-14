@@ -264,11 +264,9 @@ def plot_prediction_errors_violin(
                 )
 
         # Create violin plot
-        parts = ax.violinplot(
+        parts = ax.boxplot(
             errors_data,
             positions=range(len(errors_data)),
-            showmeans=True,
-            showmedians=True,
         )
         ax.set_xticks(range(len(model_labels)))
         ax.set_xticklabels(model_labels, rotation=45, ha="right")
