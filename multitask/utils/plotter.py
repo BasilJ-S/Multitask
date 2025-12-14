@@ -1,6 +1,8 @@
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 
 from multitask.models.baselines import BASELINE_NAMES
 
@@ -208,3 +210,160 @@ def plot_test_loss(test_results: dict, targets):
     fig.legend(loc="lower center")
     fig.suptitle("Test Loss per Task")
     fig.show()
+
+
+def plot_prediction_errors_violin(
+    test_results: dict,
+    task_names: list[str] = None,
+    file_suffix: str = "results",
+    show: bool = False,
+) -> None:
+    """
+    Create violin plots of prediction errors per task.
+
+    Args:
+        test_results: dict mapping model_name -> {task_0: {mse, mae, predictions, targets}, ...}
+        task_names: optional list of task names for display
+        file_suffix: string for saving figure
+        show: whether to display the plot
+    """
+    from pathlib import Path
+
+    model_names = list(test_results.keys())
+
+    # Determine number of tasks from first model
+    first_model_results = test_results[model_names[0]]
+    num_tasks = len([k for k in first_model_results.keys() if k.startswith("task_")])
+
+    if task_names is None:
+        task_names = [f"Task {i}" for i in range(num_tasks)]
+
+    # Create figure with subplots (one per task)
+    fig, axes = plt.subplots(1, num_tasks, figsize=(5 * num_tasks, 5))
+    if num_tasks == 1:
+        axes = [axes]
+
+    # Collect errors per model per task
+    for task_idx in range(num_tasks):
+        ax = axes[task_idx]
+        errors_data = []
+        model_labels = []
+
+        for model_name in model_names:
+            if f"task_{task_idx}" in test_results[model_name]:
+                task_data = test_results[model_name][f"task_{task_idx}"]
+                preds = np.array(task_data["predictions"])
+                targets = np.array(task_data["targets"])
+                errors = np.abs(preds - targets)
+
+                errors_data.append(errors)
+                model_labels.append(
+                    model_name.replace("NaiveMultiTaskTimeseriesWrapper(", "").replace(
+                        ")", ""
+                    )
+                )
+
+        # Create violin plot
+        parts = ax.violinplot(
+            errors_data,
+            positions=range(len(errors_data)),
+            showmeans=True,
+            showmedians=True,
+        )
+        ax.set_xticks(range(len(model_labels)))
+        ax.set_xticklabels(model_labels, rotation=45, ha="right")
+        ax.set_ylabel("Absolute Error")
+        ax.set_title(f"Prediction Errors – {task_names[task_idx]}")
+        ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    Path("plots").mkdir(exist_ok=True)
+    plt.savefig(Path("plots") / f"prediction_errors_violin_{file_suffix}.png", dpi=150)
+    if show:
+        plt.show()
+    plt.close()
+
+
+def plot_prediction_metrics_comparison(
+    test_results: dict,
+    task_names: list[str] = None,
+    file_suffix: str = "results",
+    show: bool = False,
+    metrics: list[str] = None,
+) -> None:
+    """
+    Create bar plots comparing metrics (MAE, MSE, RMSE) across models per task.
+
+    Args:
+        test_results: dict mapping model_name -> {task_0: {mse, mae, rmse, ...}, ...}
+        task_names: optional list of task names for display
+        file_suffix: string for saving figure
+        show: whether to display the plot
+        metrics: list of metrics to plot (default: ["mae", "mse", "rmse"])
+    """
+    from pathlib import Path
+
+    if metrics is None:
+        metrics = ["mae", "mse", "rmse"]
+
+    model_names = list(test_results.keys())
+    first_model_results = test_results[model_names[0]]
+    num_tasks = len([k for k in first_model_results.keys() if k.startswith("task_")])
+
+    if task_names is None:
+        task_names = [f"Task {i}" for i in range(num_tasks)]
+
+    # Create figure with subplots (one per metric)
+    fig, axes = plt.subplots(1, len(metrics), figsize=(6 * len(metrics), 5))
+    if len(metrics) == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab10")
+    model_colors = {m: cmap(i) for i, m in enumerate(model_names)}
+
+    for metric_idx, metric in enumerate(metrics):
+        ax = axes[metric_idx]
+
+        x = np.arange(num_tasks)
+        bar_width = 0.8 / len(model_names)
+
+        for model_idx, model_name in enumerate(model_names):
+            metric_values = []
+
+            for task_idx in range(num_tasks):
+                if f"task_{task_idx}" in test_results[model_name]:
+                    task_data = test_results[model_name][f"task_{task_idx}"]
+                    if metric in task_data:
+                        metric_values.append(task_data[metric])
+                    else:
+                        metric_values.append(0)
+                else:
+                    metric_values.append(0)
+
+            offset = (model_idx - len(model_names) / 2) * bar_width + bar_width / 2
+            model_label = model_name.replace(
+                "NaiveMultiTaskTimeseriesWrapper(", ""
+            ).replace(")", "")
+            ax.bar(
+                x + offset,
+                metric_values,
+                bar_width,
+                label=model_label,
+                color=model_colors[model_name],
+                alpha=0.8,
+            )
+
+        ax.set_xlabel("Task")
+        ax.set_ylabel(metric.upper())
+        ax.set_title(f"{metric.upper()} Comparison Across Models")
+        ax.set_xticks(x)
+        ax.set_xticklabels(task_names)
+        ax.legend()
+        ax.grid(axis="y", alpha=0.3)
+
+    plt.tight_layout()
+    Path("plots").mkdir(exist_ok=True)
+    plt.savefig(Path("plots") / f"metrics_comparison_{file_suffix}.png", dpi=150)
+    if show:
+        plt.show()
+    plt.close()

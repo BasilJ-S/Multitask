@@ -23,6 +23,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from multitask.models.baselines import BASELINE_NAMES
+from multitask.utils.plotter import (
+    plot_prediction_errors_violin,
+    plot_prediction_metrics_comparison,
+)
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser(description="Multi-Task Learning Experiment")
@@ -310,3 +314,84 @@ if __name__ == "__main__":
             plt.savefig(Path("plots") / f"loss_curve_task_{t_idx+1}_{file_suffix}.png")
             if args_parsed.show:
                 plt.show()
+
+        # ---------------------------------------------------------
+        # NEW: PLOT PREDICTION METRICS (MAE, MSE, RMSE)
+        # ---------------------------------------------------------
+        # Check if test_results contains detailed metrics (not just loss values)
+        first_model = list(test_results[0].keys())[0]
+        first_result = test_results[0][first_model]
+
+        # Check if we have the new detailed metrics format
+        if isinstance(first_result, dict) and "task_0" in first_result:
+            print("\n=== DETAILED METRICS FOUND ===")
+
+            # Aggregate results across trials for plotting
+            aggregated_test_results = {}
+            for model_name in model_names:
+                aggregated_test_results[model_name] = {}
+
+                for task_idx in range(num_tasks):
+                    task_key = f"task_{task_idx}"
+                    aggregated_test_results[model_name][task_key] = {
+                        "mse": 0,
+                        "mae": 0,
+                        "rmse": 0,
+                        "predictions": [],
+                        "targets": [],
+                    }
+
+                    # Average metrics across trials
+                    for trial_idx, trial in enumerate(test_results):
+                        if model_name in trial and task_key in trial[model_name]:
+                            task_data = trial[model_name][task_key]
+                            if isinstance(task_data, dict):
+                                aggregated_test_results[model_name][task_key][
+                                    "mse"
+                                ] += task_data.get("mse", 0) / len(test_results)
+                                aggregated_test_results[model_name][task_key][
+                                    "mae"
+                                ] += task_data.get("mae", 0) / len(test_results)
+                                aggregated_test_results[model_name][task_key][
+                                    "rmse"
+                                ] += task_data.get("rmse", 0) / len(test_results)
+                                # Collect all predictions and targets for violin plots
+                                if trial_idx == 0:  # Just use first trial for violin
+                                    aggregated_test_results[model_name][task_key][
+                                        "predictions"
+                                    ] = task_data.get("predictions", [])
+                                    aggregated_test_results[model_name][task_key][
+                                        "targets"
+                                    ] = task_data.get("targets", [])
+
+            # Plot metrics comparison
+            plot_prediction_metrics_comparison(
+                aggregated_test_results,
+                task_names=task_names,
+                file_suffix=file_suffix,
+                show=args_parsed.show,
+                metrics=["mae", "mse", "rmse"],
+            )
+
+            # Plot prediction errors as violin plots
+            plot_prediction_errors_violin(
+                aggregated_test_results,
+                task_names=task_names,
+                file_suffix=file_suffix,
+                show=args_parsed.show,
+            )
+
+            # Print detailed metrics
+            print("\n=== DETAILED METRICS (MAE, MSE, RMSE) ===\n")
+            for i, model in enumerate(model_names):
+                print(f"\nModel: {model_names_readable[i]}")
+                for t in range(num_tasks):
+                    task_key = f"task_{t}"
+                    if task_key in aggregated_test_results[model]:
+                        metrics = aggregated_test_results[model][task_key]
+                        print(
+                            f"  {task_names[t]:15s}  "
+                            f"MAE={metrics['mae']:.4f}  "
+                            f"MSE={metrics['mse']:.4f}  "
+                            f"RMSE={metrics['rmse']:.4f}"
+                        )

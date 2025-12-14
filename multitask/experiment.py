@@ -80,14 +80,17 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     device=torch.device("cpu"),
     reverse_task_scalers: list[StandardScaler] | None = None,
+    i_want_ground_truth_for_interpretability: bool = False,
 ):
     """
     Run one epoch of training or evaluation.
     If optimizer is provided → training mode, otherwise eval mode.
-    Returns: mean loss per task.
+    Returns: mean loss per task OR detailed metrics dict (if collecting ground truth).
     """
     is_training = optimizer is not None
     model.train() if is_training else model.eval()
+    all_predictions: list[list[torch.Tensor]] = [[] for _ in range(len(task_weights))]
+    all_ground_truth: list[list[torch.Tensor]] = [[] for _ in range(len(task_weights))]
 
     if reverse_task_scalers is not None:
         validate_scalers(reverse_task_scalers, task_weights)
@@ -99,6 +102,12 @@ def run_epoch(
         X, y = extract_batch(batch, device)
 
         predictions = forward_pass(model, X, is_training, optimizer)
+
+        # Collect predictions and targets per task
+        for task_idx in range(len(task_weights)):
+            if i_want_ground_truth_for_interpretability:
+                all_predictions[task_idx].append(predictions[task_idx].detach().cpu())
+                all_ground_truth[task_idx].append(y[task_idx].detach().cpu())
 
         if reverse_task_scalers is not None:
             predictions, y = inverse_scale_all_tasks(
@@ -119,6 +128,26 @@ def run_epoch(
             total_batch_loss = torch.stack(per_task_loss).sum()
             total_batch_loss.backward()
             optimizer.step()
+
+    if i_want_ground_truth_for_interpretability:
+        # Concatenate and compute detailed metrics
+        metrics_per_task = {}
+        for task_idx in range(len(task_weights)):
+            preds = torch.cat(all_predictions[task_idx], dim=0).numpy().flatten()
+            targets = torch.cat(all_ground_truth[task_idx], dim=0).numpy().flatten()
+
+            mse = np.mean((preds - targets) ** 2)
+            mae = np.mean(np.abs(preds - targets))
+            rmse = np.sqrt(mse)
+
+            metrics_per_task[f"task_{task_idx}"] = {
+                "mse": float(mse),
+                "mae": float(mae),
+                "rmse": float(rmse),
+                "predictions": preds.tolist(),
+                "targets": targets.tolist(),
+            }
+        return metrics_per_task
 
     return (total_loss / total_count).tolist()
 
@@ -652,6 +681,7 @@ if __name__ == "__main__":
                         optimizer=None,
                         device=device,
                         reverse_task_scalers=None,
+                        i_want_ground_truth_for_interpretability=True,
                     )
 
                     test_results[get_model_name(model)] = test_loss
